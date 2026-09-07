@@ -68,7 +68,10 @@ function residual(a: number, period: number): number {
 export class SkateWorld implements SimWorld {
   readonly board = new KinematicBody();
   readonly pelvis = new KinematicBody();
-  readonly bodies: readonly KinematicBody[] = [this.board, this.pelvis];
+  /** The body frame: board position, frame rotation only (no lean, flip, shuv or pitch). The rig
+   *  hangs its stepped pose off this, so the body rides the board smoothly. */
+  readonly frame = new KinematicBody();
+  readonly bodies: readonly KinematicBody[] = [this.board, this.pelvis, this.frame];
 
   // --- controller state ------------------------------------------------------------------------
   readonly pos = new Vector3();
@@ -255,6 +258,7 @@ export class SkateWorld implements SimWorld {
     this.writeBodies();
     this.board.teleport();
     this.pelvis.teleport();
+    this.frame.teleport();
   }
 
   /** Debug only: set speed directly. */
@@ -284,6 +288,7 @@ export class SkateWorld implements SimWorld {
     this.writeBodies();
     this.board.teleport();
     this.pelvis.teleport();
+    this.frame.teleport();
   }
 
   get surfaceId(): string {
@@ -297,6 +302,7 @@ export class SkateWorld implements SimWorld {
   step(input: InputFrame, dt: number): void {
     this.board.beginStep();
     this.pelvis.beginStep();
+    this.frame.beginStep();
     this.simTime += dt;
 
     // Button edges. Press timing feeds the pump; release length decides tap vs ollie.
@@ -1046,6 +1052,8 @@ export class SkateWorld implements SimWorld {
     this.tmp.copy(this.tangent).negate();
     this.mat.makeBasis(this.binormal, this.normal, this.tmp);
     this.q.setFromRotationMatrix(this.mat); // frame
+    this.frame.curr.pos.copy(this.pos);
+    this.frame.curr.rot.copy(this.q);
     // Board-relative: shuv about local Y, pitch about local X, flip about local Z (long axis).
     this.q2.set(0, Math.sin(this.shuv / 2), 0, Math.cos(this.shuv / 2));
     this.q3.set(Math.sin(this.pitch / 2), 0, 0, Math.cos(this.pitch / 2));
@@ -1062,7 +1070,8 @@ export class SkateWorld implements SimWorld {
       .addScaledVector(this.normal, h * Math.cos(this.lean))
       .addScaledVector(this.binormal, side)
       .addScaledVector(this.tangent, this.weight * T.weightShiftPelvis);
-    this.q2.setFromAxisAngle(this.tangent, this.lean);
+    // Roll about the forward axis so the pelvis tilts the same way it shifts (left for a left lean).
+    this.q2.setFromAxisAngle(this.tangent, -this.lean);
     p.rot.copy(this.q2).multiply(this.q);
   }
 

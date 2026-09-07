@@ -23,7 +23,7 @@ export interface GameScene {
   readonly three: Scene;
   readonly world: SimWorld;
   /** Push interpolated sim state into display objects. Called once per render frame. */
-  syncVisuals(alpha: number): void;
+  syncVisuals(alpha: number, dt: number): void;
   /** What the camera follows: the displayed board, its frame, speed and lean. */
   cameraTarget(): CameraTarget;
   dispose(): void;

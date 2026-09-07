@@ -1,6 +1,6 @@
 import { Scene, Vector3 } from 'three';
 import type { CameraTarget } from '../render/CameraRig';
-import { SkaterPlaceholder } from '../render/SkaterPlaceholder';
+import { SkaterRig } from '../render/rig/SkaterRig';
 import { buildFlatPark } from '../sim/Playground';
 import { SkateWorld } from '../sim/SkateWorld';
 import { buildGround, buildLighting, type GameScene } from './SceneBase';
@@ -12,14 +12,14 @@ export class MainScene implements GameScene {
   readonly name = 'main';
   readonly three = new Scene();
   readonly world = new SkateWorld(buildFlatPark().compound);
-  private readonly skater: SkaterPlaceholder;
+  readonly skater: SkaterRig;
   private readonly sun;
   private readonly target: CameraTarget;
 
   constructor() {
     this.sun = buildLighting(this.three, 12);
     buildGround(this.three, 400);
-    this.skater = new SkaterPlaceholder(this.world);
+    this.skater = new SkaterRig(this.world);
     this.three.add(this.skater.group);
     this.target = {
       pos: this.skater.board.position,
@@ -30,8 +30,8 @@ export class MainScene implements GameScene {
     };
   }
 
-  syncVisuals(alpha: number): void {
-    this.skater.sync(alpha);
+  syncVisuals(alpha: number, dt: number): void {
+    this.skater.sync(alpha, dt);
     this.sun.target.position.copy(this.skater.board.position);
     this.sun.position.copy(this.skater.board.position).add(SUN_OFFSET);
   }

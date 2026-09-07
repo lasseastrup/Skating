@@ -40,16 +40,22 @@ function boot(): void {
       },
       resetWorld: () => {
         scene.world.reset();
-        scene.syncVisuals(1);
+        scene.syncVisuals(1, 1 / 60);
         rig.snap(scene.cameraTarget());
       },
       boost: () => (scene.world as SkateWorld).debugSetSpeed(14),
+      cycleCharacterHz: () => {
+        const rates = [8, 12, 15, 24, 0];
+        const sk = (scene as unknown as { skater: { characterHz: number } }).skater;
+        sk.characterHz = rates[(rates.indexOf(sk.characterHz) + 1) % rates.length];
+        return sk.characterHz === 0 ? 'every frame' : `${sk.characterHz} fps`;
+      },
       switchScene: (name) => {
         const make = SCENES[name];
         if (!make || name === scene.name) return;
         scene.dispose();
         scene = make();
-        scene.syncVisuals(1);
+        scene.syncVisuals(1, 1 / 60);
         rig.snap(scene.cameraTarget());
         overlay.setScene(name);
         hook.scene = scene;
@@ -72,13 +78,15 @@ function boot(): void {
       scene.world.step(frame, dt);
     },
     render(alpha, stats) {
-      scene.syncVisuals(alpha);
-      rig.update(scene.cameraTarget(), Math.min(stats.frameMs, 100) / 1000);
+      const dt = Math.min(stats.frameMs, 100) / 1000;
+      scene.syncVisuals(alpha, dt);
+      rig.update(scene.cameraTarget(), dt);
       gfx.render(scene.three, rig.camera);
 
       if (overlay.isVisible) {
         scene.world.debugReport(overlay.set);
         overlay.set('scene', scene.name);
+        overlay.set('charHz', (scene as unknown as { skater: { characterHz: number } }).skater.characterHz || 'display');
         overlay.set('input', `${frame.stickX.toFixed(2)}, ${frame.stickY.toFixed(2)}  btn ${frame.button}`);
         const so = input.stickOrigin;
         overlay.setStick(so.id >= 0, so.x, so.y);

@@ -17,6 +17,8 @@ export interface OverlayActions {
   resetWorld(): void;
   /** Debug: set speed to the top of the range, to test the camera without a hill. */
   boost(): void;
+  /** Cycle the character pose sample rate (8 / 12 / 15 / 24 / every frame). */
+  cycleCharacterHz(): string;
   switchScene(name: string): void;
 }
 
@@ -101,6 +103,9 @@ export class DebugOverlay {
     });
     btn('reset', () => actions.resetWorld());
     btn('boost 14', () => actions.boost());
+    const hzBtn = btn('pose 12 fps', () => {
+      hzBtn.textContent = `pose ${actions.cycleCharacterHz()}`;
+    });
     for (const s of scenes) {
       const b = btn(`${s}`, () => actions.switchScene(s));
       this.sceneButtons.set(s, b);

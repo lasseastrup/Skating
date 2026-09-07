@@ -5,6 +5,116 @@ overlay (4-finger tap, backquote key, or `?debug=1`).
 
 ---
 
+## Phase 5 — The Skater: Rig, IK & Procedural Motion
+
+**Status:** complete. A 20-bone skeleton with one procedurally skinned mesh, closed-form two-bone
+IK for legs and arms, Verlet chest and hands, lean, gated head look-at, and a board with trucks,
+wheels and deck flex. **Zero animation clips.** Pose sampled stepped at a tunable rate (12 fps
+default) while the board and camera stay at display rate. Determinism unchanged (render-side only).
+
+### What was built
+
+| Area | File | Note |
+|---|---|---|
+| Bone contract | `src/render/rig/RigSpec.ts` | 20 bones, names, hierarchy, bind offsets, lengths, proportions. A GLTF asset replaces the mesh by matching these names |
+| Skeleton + mesh | `src/render/rig/Skeleton.ts` | Bones from the spec; one `SkinnedMesh` built as capsules per bone, 2 influences at joints. 2.1k triangles |
+| IK | `src/render/rig/IK.ts` | `solveTwoBone` (law of cosines, pole vector, 99.5% max reach) and `quatFromDirFront` |
+| Verlet | `src/render/rig/Verlet.ts` | One particle class: step toward a target with local gravity, distance / range constraints |
+| Rig | `src/render/rig/SkaterRig.ts` | The five layers, foot goals in board space, over-reach, stepped sampling, board group |
+| Sim | `src/sim/SkateWorld.ts` | New `frame` body: board position + frame rotation only. Pelvis roll sign fixed to match its shift |
+| Overlay | | `pose N fps` button cycles 8 / 12 / 15 / 24 / every frame; `charHz` row |
+
+The Phase 1 placeholder is gone.
+
+### Decisions
+
+**Everything is solved in the body frame, then hung off the smooth frame.** The pose (bone local
+rotations plus the pelvis offset from the board) is computed at `characterHz` in board space:
+X right, Y up, Z back, origin at the board centre. Each display frame the root is placed at the
+*interpolated* body frame. So the body rides the board smoothly at display rate while its pose
+steps, and the feet never slide between samples because the pelvis offset steps with the legs.
+Placing the root at the interpolated pelvis instead would have let a crouch move the pelvis
+between pose samples and lifted the feet off the deck.
+
+**Foot goals live in board space, exactly as the Rig Contract says.** ±0.2 m along the deck,
+±0.06 m across, plus ankle height. Front foot opened 25° toward the nose, back foot 5°. Knees are
+pole-vectored over the toes. Everything about "feet planted on a deck that rotates, tilts and
+flips" fell out of this one decision; there is no foot-planting code.
+
+**Two-bone IK, nothing fancier.** Legs hip→knee→ankle, arms shoulder→elbow→hand. Max reach 99.5%
+so knees and elbows never lock or invert. Over-reach never stretches the limb: the pelvis moves
+toward the goal by the excess, with a 10 mm / 3 mm hysteresis band. **The pushing foot is exempt**:
+its ground goal is beyond leg reach by design, and letting it tilt the pelvis dragged the whole
+torso into a hunch on every push (first screenshots). It now hovers short of the goal, which reads
+fine, and the body stays up on the carrying leg.
+
+**Verlet chest and hands, 60 Hz substeps.** Stiffness 140, drag 0.10 per step, local gravity
+4 m/s² so arms hang toward real down even on a wall. Substepped at 60 Hz inside each pose sample
+so stability does not depend on the sample rate. Shoulders are rigid on the chest rather than
+particles: two fewer things to wobble, and the arm lag alone gives the follow-through (arms fly
+up on the pop, drop through a landing) with no code for either.
+
+**Lean drives three things.** Pelvis shifts and rolls into the carve, the chest counter-rolls
+halfway back toward world up, the hands swing against the lean and rise with its magnitude.
+
+**Head look-at is gated, not blended.** Allowed: riding, grinding, plain air. Off during flips,
+shuvs, grabs and bails, when the head simply follows the chest. Target is where the line goes:
+along the nose (tail when fakie) from over the front shoulder, clamped to ±70° yaw. The "next
+feature" query the brief describes needs Phase 7's park; this is the velocity fallback until then.
+
+**Board is five separate pieces.** Deck, two trucks, four wheels as children of one group so
+Layer 5 can steer the trucks ±12° with yaw rate (opposite to each other), spin the wheels by
+distance, and sag the deck up to 12 mm under the pelvis spring's compression. Tail scrape is the
+sim's pitch channel. Eight draw calls for skater plus board.
+
+**Procedural mesh instead of a GLTF.** There is no modelling tool in this environment. The mesh
+is capsules along bones with joint blending, authored at build time in the bind pose, bound with
+`SkinnedMesh.bind`. It is a mannequin, not the final character, but it is one skinned mesh under
+22 bones with ≤2 influences, and the bone contract is the interface a real asset plugs into.
+
+### Measurements
+
+| Metric | Value |
+|---|---|
+| Bones | 20 (budget ≤ 22) |
+| Skinned mesh triangles | 2116 |
+| Influences per vertex | 1, 2 at joints (budget 2 typical / 4 max) |
+| Draw calls, playground | 16 (was 13 with the placeholder) |
+| Pose sample rate | 12 fps default, tunable live |
+| CPU work per frame, headless | ~5 ms incl. GL submit (unchanged) |
+
+### Acceptance, by eye (screenshots in the thread)
+
+- **Riding:** upright, knees soft, arms relaxed at the hips, chest opened toward the nose.
+- **Carving:** body leans into the turn, chest counter-rolls, outside arm rises.
+- **Charging:** deep crouch, arms swing back. You can see the pop coming.
+- **Pop / air:** arms fly up from the inertia, legs tuck.
+- **Grab:** hunched, back hand on the tail.
+- **Landing:** knees absorb, arms out wide.
+- **Push:** back leg down beside the deck, torso stays up.
+- **Grind:** balance pose, arms out.
+- **Vert wall:** body along the wall normal, knees bent, arms out.
+
+### Known gaps, on purpose
+
+- The spine is three straight segments (reads as stacked discs); a curved spine is a Phase 8
+  readability pass along with the real silhouette work.
+- Feet stay planted mid-trick; per-foot IK weights and catch are Phase 6.
+- Grind pose is the riding pose plus balance arms. Grind styling table is Phase 6.
+- Head aims along velocity, not at the next feature (Phase 7).
+
+### Phone checklist for this phase
+
+1. Watch the skater carve a figure-eight: the lean, counter-roll and arm swing should sell the
+   turn without any of it looking keyframed.
+2. Hold the button: the crouch should read as winding up. Release: the arms should fly up a beat
+   after the board leaves.
+3. Land hard from a big ollie: knees fold, arms out, then recover.
+4. Tap `pose 12 fps` in the overlay to cycle 8 / 12 / 15 / 24 / every-frame and pick the rate
+   that reads best against the smooth board. 12 is the default; try 8 and 15 seriously.
+
+---
+
 ## Phase 4 — Grinds
 
 **Status:** complete. Rails, ledge edges and coping are one system. Determinism holds. Scripted:

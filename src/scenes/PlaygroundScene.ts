@@ -13,7 +13,7 @@ import {
 } from 'three';
 import { ParametricGeometry } from 'three/addons/geometries/ParametricGeometry.js';
 import type { CameraTarget } from '../render/CameraRig';
-import { SkaterPlaceholder } from '../render/SkaterPlaceholder';
+import { SkaterRig } from '../render/rig/SkaterRig';
 import type { QuarterPipeSpec } from '../sim/Park';
 import { buildPlaygroundPark, PLAYGROUND } from '../sim/Playground';
 import { SkateWorld } from '../sim/SkateWorld';
@@ -32,7 +32,7 @@ export class PlaygroundScene implements GameScene {
   readonly name = 'playground';
   readonly three = new Scene();
   readonly world: SkateWorld;
-  private readonly skater: SkaterPlaceholder;
+  readonly skater: SkaterRig;
   private readonly sun;
   private readonly owned: Mesh[] = [];
   private readonly target: CameraTarget;
@@ -45,7 +45,7 @@ export class PlaygroundScene implements GameScene {
     const ground = park.builder.compound.surfaces[park.builder.ground] as PlaneSurface;
     this.buildGroundWithHoles(ground, PLAYGROUND.groundHalfSize);
 
-    this.skater = new SkaterPlaceholder(this.world);
+    this.skater = new SkaterRig(this.world);
     this.three.add(this.skater.group);
     this.target = { pos: this.skater.board.position, forward: this.world.tangent, up: this.world.normal, speed: 0, lean: 0 };
 
@@ -203,8 +203,8 @@ export class PlaygroundScene implements GameScene {
     this.add(new Mesh(g, CONCAVE));
   }
 
-  syncVisuals(alpha: number): void {
-    this.skater.sync(alpha);
+  syncVisuals(alpha: number, dt: number): void {
+    this.skater.sync(alpha, dt);
     this.sun.target.position.copy(this.skater.board.position);
     this.sun.position.copy(this.skater.board.position).add(SUN_OFFSET);
   }
