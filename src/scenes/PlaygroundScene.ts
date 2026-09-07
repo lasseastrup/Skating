@@ -1,4 +1,5 @@
 import {
+  BoxGeometry,
   BufferAttribute,
   BufferGeometry,
   CylinderGeometry,
@@ -55,6 +56,7 @@ export class PlaygroundScene implements GameScene {
     this.buildQuarterPipe({ wallX: park.halfPipe.leftWallX, facing: 1, ...common });
     this.buildQuarterPipe({ wallX: park.halfPipe.rightWallX, facing: -1, ...common });
     this.buildRail();
+    this.buildLedge();
     this.buildBowlCorner();
     for (const t of park.builder.troughs) this.buildTrough(t);
   }
@@ -127,6 +129,13 @@ export class PlaygroundScene implements GameScene {
       const p = this.add(new Mesh(post, DARK_PROP));
       p.position.set(pos.x, height / 2, pos.z + z);
     }
+  }
+
+  private buildLedge(): void {
+    const l = PLAYGROUND.ledge;
+    const m = this.add(new Mesh(new BoxGeometry(l.length, l.height, l.width), GREY_PROP));
+    m.castShadow = true;
+    m.position.set(l.x, l.height / 2, l.z);
   }
 
   /**

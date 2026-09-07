@@ -1,5 +1,5 @@
 import { Vector3 } from 'three';
-import { ParkBuilder, type BowlCornerSpec, type QuarterPipeSpec, type TroughSpec } from './Park';
+import { ParkBuilder, type BowlCornerSpec, type LedgeSpec, type QuarterPipeSpec, type TroughSpec } from './Park';
 
 /**
  * The physics test bench, as data. Phase 0 shapes plus a half-pipe (Phase 2 pumping acceptance)
@@ -17,6 +17,8 @@ export const PLAYGROUND = {
     deckDepth: 1.2,
   },
   rail: { length: 5, height: 0.45, radius: 0.03, pos: new Vector3(4, 0, -8) },
+  /** Concrete ledge on the way to the quarter pipe: grind it, ollie off the end into the transition. */
+  ledge: { x: -5.5, z: 1.4, length: 4, width: 0.6, height: 0.42 } as LedgeSpec,
   bowlCorner: { x: 10, z: 10, wallRadius: 6, transRadius: 1.8, vertExt: 0.2, deckWidth: 1.5, th0: 0, th1: Math.PI / 2 } as BowlCornerSpec,
   trough: {
     points: [new Vector3(-10, 0, 20), new Vector3(-4, 0, 22.5), new Vector3(3, 0, 19.5), new Vector3(10, 0, 22.5), new Vector3(16, 0, 20)],
@@ -42,6 +44,9 @@ export function buildPlaygroundPark(): PlaygroundPark {
   b.quarterPipe('hpR', { wallX: rightWallX, facing: -1, zCenter: hp.zCenter, width: hp.width, radius: hp.radius, vertExt: hp.vertExt, deckDepth: hp.deckDepth });
   b.bowlCorner('bowl', P.bowlCorner);
   b.trough('snake', P.trough);
+  const r = P.rail;
+  b.rail('rail', new Vector3(r.pos.x, r.height, r.pos.z - r.length / 2), new Vector3(r.pos.x, r.height, r.pos.z + r.length / 2), r.radius);
+  b.ledge('ledge', P.ledge);
   b.finish(P.groundHalfSize);
   return { builder: b, halfPipe: { leftWallX, rightWallX } };
 }

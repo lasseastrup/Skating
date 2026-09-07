@@ -2,6 +2,7 @@ import { Matrix4, Quaternion, Vector3 } from 'three';
 import type { InputFrame } from '../core/Input';
 import { KinematicBody, type SimWorld } from '../core/Sim';
 import type { ProjectResult } from './Surface';
+import type { GrindPath } from './Grind';
 import type { Compound } from './surfaces/Compound';
 import { TUNING as T } from './Tuning';
 
@@ -11,6 +12,7 @@ export enum SkateState {
   Pushing = 'Pushing',
   Pop = 'Pop',
   Air = 'Air',
+  Grinding = 'Grinding',
   Bailed = 'Bailed',
 }
 
@@ -131,6 +133,24 @@ export class SkateWorld implements SimWorld {
   lastMisalignDeg = 0;
   private bailTimer = 0;
 
+  // --- grind state -----------------------------------------------------------------------------
+  grindPath: GrindPath | null = null;
+  private grindT = 0;
+  /** +1 when the board's nose points along the path's parameter direction, -1 when against. */
+  private grindDir = 1;
+  private grindBlend = 1;
+  private readonly grindOffset = new Vector3();
+  private grindDropTimer = 0;
+  private grindStallTimer = 0;
+  private lastGrindExit = -10;
+  private reattachDelay: number = T.grindReattachDelay;
+  grinds = 0;
+  grindDistance = 0;
+  private readonly gP = new Vector3();
+  private readonly gT = new Vector3();
+  private readonly gK = new Vector3();
+  private readonly gUp = new Vector3();
+
   private readonly spawn = { x: 0, z: 0, heading: 0 };
   private spawnY: number = T.rideHeight;
 
@@ -205,6 +225,17 @@ export class SkateWorld implements SimWorld {
     this.predSurface = -1;
     this.lastMisalignDeg = 0;
     this.bailTimer = 0;
+    this.grindPath = null;
+    this.grindT = 0;
+    this.grindDir = 1;
+    this.grindBlend = 1;
+    this.grindOffset.set(0, 0, 0);
+    this.grindDropTimer = 0;
+    this.grindStallTimer = 0;
+    this.lastGrindExit = -10;
+    this.reattachDelay = T.grindReattachDelay;
+    this.grinds = 0;
+    this.grindDistance = 0;
 
     // Find the surface under the spawn point.
     this.current = -1;
@@ -281,7 +312,7 @@ export class SkateWorld implements SimWorld {
     if (released) {
       this.grabbing = false;
       if (this.holdTime >= T.tapHold) {
-        if (this.grounded) this.startPop(input);
+        if (this.grounded || this.state === SkateState.Grinding) this.startPop(input);
         else if (this.state === SkateState.Air && this.coyote > 0) this.coyotePop(input);
       }
     }
@@ -301,6 +332,9 @@ export class SkateWorld implements SimWorld {
         break;
       case SkateState.Air:
         this.stepAir(input, dt);
+        break;
+      case SkateState.Grinding:
+        this.stepGrind(input, dt);
         break;
       case SkateState.Bailed:
         this.stepBail(dt);
@@ -482,6 +516,11 @@ export class SkateWorld implements SimWorld {
 
   // --- pop: tail down, then leave along the normal ----------------------------------------------
   private startPop(input: InputFrame): void {
+    if (this.state === SkateState.Grinding) {
+      this.lastGrindExit = this.simTime;
+      this.reattachDelay = T.grindReattachDelay;
+      this.grindPath = null;
+    }
     this.state = SkateState.Pop;
     this.popTimer = 0;
     this.popCharge = this.charge;
@@ -616,6 +655,8 @@ export class SkateWorld implements SimWorld {
       this.pitch *= Math.exp(-dt / (T.pitchDecayTau * 0.5));
     }
 
+    if (this.tryAttachGrind()) return;
+
     if (this.airTime < 0.02) return;
     const n = this.compound.query(this.pos, this.cand);
     let best: ProjectResult | null = null;
@@ -723,7 +764,11 @@ export class SkateWorld implements SimWorld {
       // Heading snaps to velocity. Past the snap angle the landing is sketchy and scrubs speed.
       this.tangent.copy(this.tmp);
       if (fakie) this.tangent.negate();
-      speed = fakie ? -vt : vt;
+      // Horizontal speed is preserved (the brief), and so is the tangential projection when it is
+      // larger (coming down a wall). Hitting a transition steeply no longer eats your speed.
+      const vh = Math.hypot(this.vel.x, this.vel.z);
+      const kept = Math.max(vt, vh);
+      speed = fakie ? -kept : kept;
       if (mis > T.landSnapAngle) {
         speed *= 1 - (0.5 * (mis - T.landSnapAngle)) / (T.landBailAngle - T.landSnapAngle);
       }
@@ -753,6 +798,170 @@ export class SkateWorld implements SimWorld {
     this.landingPredicted = false;
     this.headingAssisting = false;
     this.pelvisV += vn * T.landPelvisKick;
+  }
+
+  // --- grinds: a 1D constraint on a spline, never a failure -----------------------------------
+  /**
+   * Assist Charter: auto-attach to an edge within 0.35 m and 35° of its tangent while descending.
+   * No button, no balance minigame.
+   */
+  private tryAttachGrind(): boolean {
+    if (this.vel.y > T.grindMaxRise || this.airTime < 0.05) return false;
+    if (this.simTime - this.lastGrindExit < this.reattachDelay) return false;
+    const cosMax = Math.cos(T.grindSnapAngle);
+    const grinds = this.compound.grinds;
+    for (let i = 0; i < grinds.length; i++) {
+      const g = grinds[i];
+      const t = g.path.closestT(this.pos);
+      g.path.frame(t, this.gP, this.gT, this.gK);
+      // Within reach sideways, and above the edge but not by more than a short fall.
+      const dy = this.pos.y - this.gP.y;
+      if (dy < -0.05 || dy > T.grindSnapAbove) continue;
+      if (Math.hypot(this.pos.x - this.gP.x, this.pos.z - this.gP.z) > T.grindSnapDistance) continue;
+      // The board has to be roughly level to sit on an edge; a board pointing up a wall whose
+      // tiny horizontal component happens to run along the coping is not a grind.
+      if (Math.abs(this.tangent.y) > T.grindMaxTangentY) continue;
+      // Board heading vs edge tangent, horizontal, mod 180 (grinding backwards is fine).
+      this.tmp.set(this.tangent.x, 0, this.tangent.z);
+      this.tmp2.set(this.gT.x, 0, this.gT.z);
+      if (this.tmp.lengthSq() < 1e-6 || this.tmp2.lengthSq() < 1e-6) continue;
+      this.tmp.normalize();
+      this.tmp2.normalize();
+      if (Math.abs(this.tmp.dot(this.tmp2)) < cosMax) continue;
+      this.attachGrind(g, t);
+      return true;
+    }
+    return false;
+  }
+
+  private attachGrind(g: GrindPath, t: number): void {
+    this.state = SkateState.Grinding;
+    this.grindPath = g;
+    this.grindT = t;
+    this.grinds++;
+    g.path.frame(t, this.gP, this.gT, this.gK);
+    g.upAt(this.gP, this.gUp);
+    this.grindDir = this.tangent.dot(this.gT) >= 0 ? 1 : -1;
+    // Velocity along the edge survives; the rest is absorbed into the pelvis spring.
+    this.speed = this.vel.dot(this.gT) * this.grindDir;
+    const vUp = this.vel.dot(this.gUp);
+    if (vUp < 0) this.pelvisV += vUp * T.landPelvisKick;
+    // Remember where we were relative to the constraint and blend that away over 80 ms.
+    this.tmp.copy(this.gP).addScaledVector(this.gUp, g.height);
+    this.grindOffset.subVectors(this.pos, this.tmp);
+    this.grindBlend = 0;
+    this.grindDropTimer = 0;
+    this.grindStallTimer = 0;
+    // Catch the board.
+    this.flip -= residual(this.flip, 2 * Math.PI);
+    this.shuv -= residual(this.shuv, Math.PI);
+    this.flipTarget = this.flip;
+    this.shuvTarget = this.shuv;
+    this.pitch = 0;
+    this.spinRate = 0;
+    this.spinRemaining = 0;
+    this.grabbing = false;
+    this.landingPredicted = false;
+    this.headingAssisting = false;
+    this.current = -1;
+    this.curvature = 0;
+    this.normalForce = 0;
+    this.inTransition = false;
+    this.coyote = 0;
+    this.airTime = 0;
+  }
+
+  private stepGrind(input: InputFrame, dt: number): void {
+    const g = this.grindPath!;
+    const path = g.path;
+
+    // Energy: material friction (always below rolling friction) and gravity along a sloped edge.
+    this.speed -= this.speed * g.friction * dt;
+    this.speed += -T.gravity * this.tangent.y * dt;
+
+    // Advance along the spline: arc speed → parameter speed.
+    path.evaluate(this.grindT, this.gP, this.gT);
+    const dpdt = Math.max(1e-6, this.gT.length());
+    this.grindT += (this.grindDir * this.speed * dt) / dpdt;
+    this.grindDistance += Math.abs(this.speed) * dt;
+    this.distance += Math.abs(this.speed) * dt;
+    if (this.grindT < 0 || this.grindT > 1) {
+      // Off the end: launch along the tangent, keeping speed. Coyote so a late ollie still pops.
+      this.exitGrind(T.grindReattachDelay);
+      return;
+    }
+
+    // Frame chases the edge frame; the position offset blends away.
+    path.frame(this.grindT, this.gP, this.gT, this.gK);
+    g.upAt(this.gP, this.gUp);
+    const step = (Math.PI / T.grindBlendTime) * dt;
+    this.rotateNormalToward(this.gUp, step);
+    this.tmp.copy(this.gT).multiplyScalar(this.grindDir);
+    this.rotateTangentToward(this.tmp, step);
+    this.grindBlend = Math.min(1, this.grindBlend + dt / T.grindBlendTime);
+    this.pos.copy(this.gP).addScaledVector(this.gUp, g.height).addScaledVector(this.grindOffset, 1 - this.grindBlend);
+    this.vel.copy(this.tangent).multiplyScalar(this.speed);
+
+    // Drop off the side: hold the stick sideways.
+    if (Math.abs(input.stickX) > 0.7) {
+      this.grindDropTimer += dt;
+      if (this.grindDropTimer >= T.grindDropHold) {
+        const side = Math.sign(input.stickX);
+        this.exitGrind(T.grindReattachDelay);
+        this.vel.addScaledVector(this.binormal, side * T.grindDropPush);
+        return;
+      }
+    } else {
+      this.grindDropTimer = 0;
+    }
+
+    // A stall (no speed along the edge) is a pose, not a resting state: after a moment the
+    // skater drops off toward the side the edge tilts to (into the transition for coping), or
+    // toward the stick, or to the right. Grinding never fails, but it always ends.
+    if (Math.abs(this.speed) < T.grindStallSpeed) {
+      this.grindStallTimer += dt;
+      if (this.grindStallTimer >= T.grindStallTime) {
+        // Tilt side = the horizontal part of the edge's up vector.
+        this.tmp.set(this.gUp.x, 0, this.gUp.z);
+        let side: number;
+        if (this.tmp.lengthSq() > 1e-4) side = Math.sign(this.tmp.dot(this.binormal)) || 1;
+        else side = input.stickX !== 0 ? Math.sign(input.stickX) : 1;
+        // Pivot the board to face the drop before leaving, like rocking off a stall.
+        this.tmp2.copy(this.binormal).multiplyScalar(side);
+        this.exitGrind(T.grindReattachDelayAfterStall);
+        this.vel.addScaledVector(this.tmp2, T.grindStallPush);
+        this.vel.y -= 0.5;
+        this.tangent.copy(this.tmp2);
+        this.binormal.crossVectors(this.tangent, this.normal).normalize();
+        this.vel.copy(this.tmp2).multiplyScalar(T.grindStallPush);
+        this.vel.y = -0.5;
+      }
+    } else {
+      this.grindStallTimer = 0;
+    }
+  }
+
+  private exitGrind(reattachDelay: number): void {
+    this.lastGrindExit = this.simTime;
+    this.reattachDelay = reattachDelay;
+    this.grindPath = null;
+    this.grindBlend = 1;
+    this.toAir(true);
+  }
+
+  /** Rotate the tangent about the normal toward `dir` (projected), by at most `maxStep`. */
+  private rotateTangentToward(dir: Vector3, maxStep: number): void {
+    this.tmp2.copy(dir).addScaledVector(this.normal, -dir.dot(this.normal));
+    if (this.tmp2.lengthSq() < 1e-8) return;
+    this.tmp2.normalize();
+    const d = Math.min(1, Math.max(-1, this.tangent.dot(this.tmp2)));
+    const angle = Math.acos(d);
+    if (angle < 1e-5) return;
+    this.axis.crossVectors(this.tangent, this.tmp2);
+    const sgn = this.axis.dot(this.normal) >= 0 ? 1 : -1;
+    this.q.setFromAxisAngle(this.normal, sgn * Math.min(angle, maxStep));
+    this.tangent.applyQuaternion(this.q).normalize();
+    this.binormal.crossVectors(this.tangent, this.normal).normalize();
   }
 
   // --- bail: down for a moment, then back on the board ---------------------------------------
@@ -801,6 +1010,10 @@ export class SkateWorld implements SimWorld {
     if (leanTarget > T.leanMax) leanTarget = T.leanMax;
     else if (leanTarget < -T.leanMax) leanTarget = -T.leanMax;
     if (inAir || this.state === SkateState.Pop) leanTarget = 0;
+    if (this.state === SkateState.Grinding) {
+      // Cosmetic wobble; the button is the lock. Grinding never fails either way.
+      leanTarget = input.button ? 0 : T.grindWobble * Math.sin(2 * Math.PI * T.grindWobbleHz * this.simTime);
+    }
     if (this.state === SkateState.Bailed) leanTarget = 1.2;
     this.lean += (leanTarget - this.lean) * Math.min(1, T.leanRate * dt);
 
@@ -811,6 +1024,8 @@ export class SkateWorld implements SimWorld {
       target = 0.3;
     } else if (inAir) {
       target = T.pelvisStand - (this.grabbing ? T.grabTuck : 0);
+    } else if (this.state === SkateState.Grinding) {
+      target = T.pelvisStand - 0.06 - this.charge * T.pelvisCrouch - Math.abs(this.speed) * T.pelvisSpeedCrouch;
     } else {
       const load = Math.min(0.3, Math.max(0, this.curvature * this.speed * this.speed * T.pelvisCurvatureCrouch));
       target = T.pelvisStand - this.charge * T.pelvisCrouch - Math.abs(this.speed) * T.pelvisSpeedCrouch - load;
@@ -859,6 +1074,7 @@ export class SkateWorld implements SimWorld {
     kv('board', `flip ${(this.flip / D).toFixed(0)}°  shuv ${(this.shuv / D).toFixed(0)}°  pitch ${(this.pitch / D).toFixed(0)}°`);
     kv('air', `${this.airTime.toFixed(2)} s  coyote ${this.coyote > 0 ? this.coyote.toFixed(2) : '—'}  land→ ${this.landingPredicted ? this.compound.surfaces[this.predSurface].id : '—'}`);
     kv('landings', `${this.landings}  bails ${this.bails}  last mis ${this.lastMisalignDeg.toFixed(0)}°`);
+    kv('grind', this.grindPath ? `${this.grindPath.id} (${this.grindPath.material})  t ${this.grindT.toFixed(2)}${this.prevButton ? '  lock' : ''}` : `—  (${this.grinds}, ${this.grindDistance.toFixed(0)} m)`);
     kv('curv', `${this.curvature.toFixed(3)} /m  N ${this.normalForce.toFixed(1)}`);
     kv('pump', this.inTransition ? `${this.pumpFactor.toFixed(1)} (${this.transitions})` : `— (${this.transitions})`);
     kv('yawRate', `${this.yawRate.toFixed(2)} rad/s`);

@@ -1,4 +1,5 @@
 import { Vector3 } from 'three';
+import type { GrindPath } from '../Grind';
 import { ProjectResult, type RideSurface } from '../Surface';
 
 const MAX_CANDIDATES = 24;
@@ -11,6 +12,8 @@ const MAX_CANDIDATES = 24;
 export class Compound {
   readonly surfaces: RideSurface[] = [];
   readonly neighbours: number[][] = [];
+  /** Grindable edges. Few enough to test them all every air step. */
+  readonly grinds: GrindPath[] = [];
   /** Preallocated projection results, one per candidate slot. */
   readonly results: ProjectResult[] = [];
   private readonly cellSize: number;
@@ -30,6 +33,11 @@ export class Compound {
     this.surfaces.push(s);
     this.neighbours.push([]);
     return this.surfaces.length - 1;
+  }
+
+  addGrind(g: GrindPath): number {
+    this.grinds.push(g);
+    return this.grinds.length - 1;
   }
 
   /** Declare that a skater may roll directly between a and b (they share an edge). */

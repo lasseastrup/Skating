@@ -17,4 +17,4 @@ npm run build:single     # one-file dist/coping.html for hosting anywhere
 
 Scenes: `?scene=playground` (physics test bench, the default until Phase 7) and `?scene=main` (the game, an empty plane for now).
 
-See `DEBUG.md` for the per-phase decision log. Currently at **Phase 3 — Air**.
+See `DEBUG.md` for the per-phase decision log. Currently at **Phase 4 — Grinds**.

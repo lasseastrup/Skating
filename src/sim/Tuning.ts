@@ -151,4 +151,30 @@ export const TUNING = {
   /** Bail: how long the skater is down, and speed decay per second while down. */
   bailDuration: 0.9,
   bailDecay: 4,
+
+  // --- Phase 4: grinds ---------------------------------------------------------------------------
+  /** Auto-attach: within this distance of the edge and this angle of its tangent, while descending. */
+  grindSnapDistance: 0.35,
+  grindSnapAngle: (35 * Math.PI) / 180,
+  /** Vertical band above the edge that still counts, and the upward speed we still call "descending"
+   *  (crossing a rail at the apex of an ollie should catch it). */
+  grindSnapAbove: 0.45,
+  grindMaxRise: 1.0,
+  /** Board must be within ~50° of level to catch an edge (|tangent.y| below this). */
+  grindMaxTangentY: 0.77,
+  /** Blend into the constraint over this long so the snap is not visible. */
+  grindBlendTime: 0.08,
+  /** Hold the stick sideways this long to drop off the side, with this much lateral push. */
+  grindDropHold: 0.15,
+  grindDropPush: 1.0,
+  /** Cosmetic wobble (rad) and its frequency; the button (lock) kills it. */
+  grindWobble: 0.06,
+  grindWobbleHz: 2.6,
+  /** Minimum time in the air before a grind can catch us again after leaving one. */
+  grindReattachDelay: 0.15,
+  /** A stall (|speed| below this for longer than this) ends by dropping toward the tilt side. */
+  grindStallSpeed: 0.6,
+  grindStallTime: 0.6,
+  grindStallPush: 1.2,
+  grindReattachDelayAfterStall: 0.6,
 } as const;

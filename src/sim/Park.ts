@@ -1,4 +1,5 @@
 import { Vector3 } from 'three';
+import { GrindPath } from './Grind';
 import { AnnularSectorBounds, RectBounds, type Bounds2D } from './surfaces/Bounds';
 import { Compound } from './surfaces/Compound';
 import { CylinderSurface } from './surfaces/Cylinder';
@@ -36,6 +37,14 @@ export interface BowlCornerSpec {
   /** Angular range of the corner around the axis. */
   th0: number;
   th1: number;
+}
+
+export interface LedgeSpec {
+  x: number;
+  z: number;
+  length: number;
+  width: number;
+  height: number;
 }
 
 export interface TroughSpec {
@@ -109,6 +118,16 @@ export class ParkBuilder {
     const di = this.compound.add(deck);
     this.compound.connect(ti, vi);
     this.groundLinks.push(ti);
+    // Coping: a straight grind path along the lip, tilted a little over the transition.
+    this.compound.addGrind(
+      new GrindPath(
+        `${name}.coping`,
+        new SplinePath([new Vector3(s.wallX, deckY, zc - hw), new Vector3(s.wallX, deckY, zc), new Vector3(s.wallX, deckY, zc + hw)]),
+        'coping',
+        0.09,
+        { dir: new Vector3(f, 0, 0), amount: 0.35 },
+      ),
+    );
     // Footprint hole: from the deck's back edge to the transition toe.
     const xa = f > 0 ? s.wallX - s.deckDepth : s.wallX - r;
     const xb = f > 0 ? s.wallX + r : s.wallX + s.deckDepth;
@@ -153,7 +172,48 @@ export class ParkBuilder {
     this.compound.connect(ti, wi);
     this.groundLinks.push(ti);
     this.groundHoles.push(new AnnularSectorBounds(s.x, -s.z, Rmaj, s.wallRadius + s.deckWidth, -s.th1, -s.th0));
+    // Pool coping around the lip, tilted toward the bowl axis.
+    const pts: Vector3[] = [];
+    const segs = 10;
+    for (let i = 0; i <= segs; i++) {
+      const th = s.th0 + ((s.th1 - s.th0) * i) / segs;
+      pts.push(new Vector3(s.x + s.wallRadius * Math.cos(th), deckY, s.z + s.wallRadius * Math.sin(th)));
+    }
+    this.compound.addGrind(new GrindPath(`${name}.coping`, new SplinePath(pts), 'coping', 0.09, { toward: new Vector3(s.x, 0, s.z), amount: 0.35 }));
     return { trans: ti, wall: wi, deck: di };
+  }
+
+  /** A straight steel rail between two points. Visual-only until Phase 7 adds collision. */
+  rail(name: string, a: Vector3, b: Vector3, radius: number): void {
+    const mid = new Vector3().addVectors(a, b).multiplyScalar(0.5);
+    this.compound.addGrind(new GrindPath(name, new SplinePath([a.clone(), mid, b.clone()]), 'steel', radius + 0.08));
+  }
+
+  /**
+   * A rectangular concrete ledge: a rideable top plane plus a grind path along each long edge.
+   * Centre (x, z), length along X, width along Z.
+   */
+  ledge(name: string, s: LedgeSpec): number {
+    const top = new PlaneSurface(
+      `${name}.top`,
+      new Vector3(s.x, s.height, s.z),
+      new Vector3(1, 0, 0),
+      new Vector3(0, 0, -1),
+      new RectBounds(-s.length / 2, s.length / 2, -s.width / 2, s.width / 2),
+    );
+    const idx = this.compound.add(top);
+    for (const side of [-1, 1]) {
+      const z = s.z + (side * s.width) / 2;
+      this.compound.addGrind(
+        new GrindPath(
+          `${name}.edge${side > 0 ? 'S' : 'N'}`,
+          new SplinePath([new Vector3(s.x - s.length / 2, s.height, z), new Vector3(s.x, s.height, z), new Vector3(s.x + s.length / 2, s.height, z)]),
+          'concrete',
+          0.09,
+        ),
+      );
+    }
+    return idx;
   }
 
   trough(name: string, s: TroughSpec): number {

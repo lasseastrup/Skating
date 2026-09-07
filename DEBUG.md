@@ -5,6 +5,97 @@ overlay (4-finger tap, backquote key, or `?debug=1`).
 
 ---
 
+## Phase 4 — Grinds
+
+**Status:** complete. Rails, ledge edges and coping are one system. Determinism holds. Scripted:
+attach works to 34° and refuses at 40°, a bowl's coping grinds end to end, a ledge grind ollies
+into the quarter pipe at full speed, and the Phase 3 half-pipe regression is still 40/40.
+
+### What was built
+
+| Area | File | Note |
+|---|---|---|
+| Grind path | `src/sim/Grind.ts` | A `SplinePath` plus material (steel / concrete / coping), sit height, and an optional inward tilt for coping |
+| Registry | `src/sim/surfaces/Compound.ts` | `grinds[]`; few enough to test all of them every air step |
+| Builders | `src/sim/Park.ts` | Quarter pipes and bowl corners now emit coping along their lips; `rail()` and `ledge()` (top plane + two edges) |
+| Playground | `src/sim/Playground.ts` | The rail is grindable; a 4 m concrete ledge sits on the run-up to the quarter pipe |
+| Controller | `src/sim/SkateWorld.ts` | **Grinding** state: auto-attach, 1D constraint, 80 ms blend, friction, three exits, stall timeout, wobble/lock |
+| Overlay | | `grind` row: path, material, parameter, lock; totals |
+
+### Decisions
+
+**A grind is a 1D constraint, not a surface.** Position is `P(t) + up·height`, speed is signed
+along the path tangent, `t` advances by `speed·dt / |P'(t)|`. The frame chases the edge frame at
+the same rate the position offset blends away (80 ms), so the snap is a settle, not a jump: max
+per-step movement at attach is the same 6 cm as free flight.
+
+**Auto-attach per the Charter, plus two guards.** Within 0.35 m horizontally, between 5 cm below
+and 45 cm above the edge, heading within 35° of the tangent (mod 180: grinding backwards is
+fine), and descending. Two additions from testing: "descending" allows up to 1 u/s of rise so
+crossing a rail at the apex of an ollie catches it; and the board must be within ~50° of level.
+Without the second, a board pointing straight up a vert wall whose tiny horizontal component ran
+along the coping caught the lip on every air.
+
+**Grinding never fails, but it always ends.** Three exits from the brief: off the end (launch
+along the tangent, keep speed, coyote armed), ollie (release pops along the edge's up), drop off
+the side (stick held sideways 150 ms). One more was needed: a **stall**. A coping catch with no
+speed along the edge sat there forever, crept off the end at 0.08 u/s after 17 s and pushed off
+the edge of the world. Now |speed| < 0.6 for 0.6 s drops the skater toward the tilt side (into the
+transition for coping), with the board pivoted to face the drop, and a 0.6 s re-attach delay so
+the same edge cannot catch them on the way down. It reads as rock-to-fakie / drop-in.
+
+**Friction below rolling friction.** Steel 0.06/s, coping 0.09/s, concrete 0.12/s, ground 0.15/s.
+Measured over 5 m from 6 u/s: rail keeps 5.7, ground keeps 5.0. Grinding feels fast.
+
+**Landing preserves horizontal speed.** Found through the ledge test. The Phase 3 landing kept
+only the tangential projection of velocity, which is physically right and game-wrong: an ollie
+from the ledge into the transition hit the concave surface steeply and kept 2.7 of 5.8 u/s. The
+brief says preserve horizontal speed, so landing speed is now `max(tangential, horizontal)`.
+Coming down a wall the tangential term still wins, so vert airs are unchanged (regression 40/40,
+equilibrium speed rose from 13.5–14.5 to 14–15.4).
+
+**Coping tilt.** Coping paths carry an `up` leaned 0.35 toward the transition (bowl axis or the
+quarter pipe's facing), so the board hangs over the lip instead of sitting flat on the deck edge.
+
+### Measurements (scripted, 120 Hz, playground)
+
+| Test | Result |
+|---|---|
+| Descend onto the rail at 0 / 20 / 30 / 34° to its tangent | attach, board aligns to 0° |
+| Same at 40 / 60 / 90° | no attach (falls past) |
+| Ollie from the flat onto the rail at 0 / 15 / 25° approach | attach, grind, land |
+| Bowl coping from θ = 8° at 5 u/s, button held (lock) | 8.33 m of the 8.59 m arc, exit at the end at 4.3 u/s, land |
+| Half-pipe coping along the lip at 4 u/s | 5.3 m grind, exit, land on the deck side |
+| Coping stall (level board, zero speed) | 0.6 s stall, drop in, land in the transition at 7.9 u/s, no bail |
+| Ledge grind 2 m, ollie off, into the quarter pipe | land on the transition at **5.8 u/s** (2.7 before the landing fix), line kept |
+| Drop off the rail's side | lands on the ground beside it |
+| 5 m at 6 u/s: rail vs ground | 5.70 vs 5.01 |
+| Half-pipe regression, 3 seeds × 40 airs with spin | 40/40 each, 0 coping catches |
+| 40 random drops | 47 landings, 0 bails, 0 fall-throughs |
+
+### Known gaps, on purpose
+
+- **No collision with rail posts, ledge sides or ramp bodies.** Riding into a ledge from the
+  ground passes through it. Collision mercy (auto-pop over a ledge you would slam) needs Phase 7
+  geometry and lands with it.
+- **Grind pose is a straight 50-50.** Board yaw on the edge, the six contact targets and the
+  classifier (5-0, nose, crooked…) are Phase 6, as the brief says.
+- **The bowl corner's coping ends in air**, like its transition (quarter of a bowl).
+- **Camera** has no grind behaviour yet (Phase 8: pull back, drop 0.3 m).
+
+### Phone checklist for this phase
+
+1. Ollie onto the rail ahead of the spawn from any reasonable angle. You should lock on and slide
+   with a little wobble; hold the button to steady it. Off the end you launch and land.
+2. Push the stick sideways mid-grind: you drop off that side.
+3. Grind the ledge on the way to the quarter pipe, hold, release near the end: you fly into the
+   transition and keep your speed.
+4. Fly out of the half-pipe and spin a quarter turn at the lip: you should catch the coping and
+   slide it. Stop on it and you drop back in on your own.
+5. Carve up the bowl and catch the coping: it should carry you round the whole corner.
+
+---
+
 ## Phase 3 — Air
 
 **Status:** complete. Ollie, trick rose, spin, grab, coyote time, predictive landing alignment,
