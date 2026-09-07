@@ -87,7 +87,7 @@ export class Compound {
           const idx = list[i];
           if (this.stamp[idx] === this.stampValue) continue;
           this.stamp[idx] = this.stampValue;
-          if (!this.surfaces[idx].aabb.containsPoint(p) && this.surfaces[idx].aabb.distanceToPoint(p) > 1.0) continue;
+          if (!this.surfaces[idx].aabb.containsPoint(p) && this.surfaces[idx].aabb.distanceToPoint(p) > 3.0) continue;
           out[n++] = idx;
         }
       }

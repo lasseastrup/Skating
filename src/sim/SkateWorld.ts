@@ -9,25 +9,59 @@ import { TUNING as T } from './Tuning';
 export enum SkateState {
   Riding = 'Riding',
   Pushing = 'Pushing',
+  Pop = 'Pop',
   Air = 'Air',
+  Bailed = 'Bailed',
 }
 
+/** A trick is a set of rotation targets picked from the 8-way rose at takeoff. Phase 6 replaces
+ *  names with continuous flip/scoop channels; for now four base tricks and their mirrors. */
+interface Trick {
+  name: string;
+  /** Body spin about world up, radians. Negative = frontside for a regular skater. */
+  spin: number;
+  /** Board rotation about its long axis, radians. */
+  flip: number;
+  /** Board rotation about its normal relative to the body, radians. */
+  shuv: number;
+}
+
+const OLLIE: Trick = { name: 'ollie', spin: 0, flip: 0, shuv: 0 };
+const D = Math.PI / 180;
+/** Rose indexed by direction: E, NE, N, NW, W, SW, S, SE (stick angle / 45°). */
+const ROSE: Trick[] = [
+  { name: 'fs 180', spin: -180 * D, flip: 0, shuv: 0 },
+  { name: 'fs kickflip', spin: -180 * D, flip: 360 * D, shuv: 0 },
+  { name: 'kickflip', spin: 0, flip: 360 * D, shuv: 0 },
+  { name: 'bs kickflip', spin: 180 * D, flip: 360 * D, shuv: 0 },
+  { name: 'bs 180', spin: 180 * D, flip: 0, shuv: 0 },
+  { name: 'bs 360 shuv', spin: 180 * D, flip: 0, shuv: 360 * D },
+  { name: '360 shuv', spin: 0, flip: 0, shuv: 360 * D },
+  { name: 'fs 360 shuv', spin: -180 * D, flip: 0, shuv: 360 * D },
+];
+
 const MAX_CAND = 24;
+
+/** Residual of `a` to the nearest multiple of `period`, in [-period/2, period/2]. */
+function residual(a: number, period: number): number {
+  return a - Math.round(a / period) * period;
+}
 
 /**
  * The kinematic character controller. Not a rigid body. Position, signed speed and a surface
  * frame (normal, tangent, binormal) constrained to one analytic ride surface of a Compound at
  * ride height, or ballistic when nothing claims it.
  *
- * The board is the authority: `board` is the transform the surface controller computes.
- * The skater (`pelvis`) is solved onto it every step.
+ * The board is the authority: `board` is the transform the surface controller computes, the
+ * frame plus board-relative pitch/flip/shuv. The skater (`pelvis`) is solved onto the frame.
  *
  * Energy rules:
  *  - gravity is split: the tangential part accelerates, the normal part is absorbed
  *  - rolling friction is a small exponential decay; carving costs ∝ yawRate²
  *  - there is no lateral velocity: speed is preserved and re-aimed along the heading
- *  - pumping injects pumpEff·κ·v² in transitions, ×0.7 automatically, ×1.0 when timed
- *  - you leave the surface when κ·v² + g·n.y < 0 (the normal force would have to pull)
+ *  - pumping injects pumpEff·κ in transitions, ×0.7 automatically, ×1.0 when timed
+ *  - you leave the surface when κ·v² + g·n.y < 0, or when you pop
+ *  - landing keeps tangential velocity, snaps heading within 45°, bails past 70°
  */
 export class SkateWorld implements SimWorld {
   readonly board = new KinematicBody();
@@ -44,11 +78,8 @@ export class SkateWorld implements SimWorld {
   speed = 0;
   yawRate = 0;
   state = SkateState.Riding;
-  /** Index of the surface we ride, -1 in the air. */
   current = -1;
-  /** Normal curvature along the tangent at the contact point. */
   curvature = 0;
-  /** Normal force proxy κv² + g·n.y (m/s²). Negative would mean detached. */
   normalForce = 0;
   airTime = 0;
   simTime = 0;
@@ -62,18 +93,45 @@ export class SkateWorld implements SimWorld {
   private pelvisV = 0;
   distance = 0;
 
-  /** Pumping. */
   inTransition = false;
   pumpFactor = 0;
   private lastPress = -10;
   private transitionEntry = -10;
   private prevButton = 0;
-  /** Count of completed transition passes, for tests. */
   transitions = 0;
   landings = 0;
+  bails = 0;
+
+  // --- air state -------------------------------------------------------------------------------
+  /** Button hold duration, for tap-vs-ollie and charge. */
+  holdTime = 0;
+  private popTimer = 0;
+  private popCharge = 0;
+  /** Time left in which a release still pops after leaving a lip without popping. */
+  coyote = 0;
+  private readonly lastGroundNormal = new Vector3(0, 1, 0);
+  trick: Trick = OLLIE;
+  /** Body spin about world up, rad/s, and how much of the trick's spin is still owed. */
+  spinRate = 0;
+  private spinRemaining = 0;
+  private spinDir = 0;
+  private trickRate = 0;
+  /** Board-relative angles (rad): pitch about right, flip about long axis, shuv about normal. */
+  pitch = 0;
+  flip = 0;
+  shuv = 0;
+  private flipTarget = 0;
+  private shuvTarget = 0;
+  grabbing = false;
+  /** Landing prediction. */
+  landingPredicted = false;
+  private headingAssisting = false;
+  private readonly predNormal = new Vector3();
+  predSurface = -1;
+  lastMisalignDeg = 0;
+  private bailTimer = 0;
 
   private readonly spawn = { x: 0, z: 0, heading: 0 };
-  /** Height the spawn search starts from; surfaces within 2 m below are candidates. */
   private spawnY: number = T.rideHeight;
 
   // Private scratch. Allocated once; the step never allocates.
@@ -86,6 +144,8 @@ export class SkateWorld implements SimWorld {
   private readonly axis = new Vector3();
   private readonly mat = new Matrix4();
   private readonly q = new Quaternion();
+  private readonly q2 = new Quaternion();
+  private readonly q3 = new Quaternion();
 
   constructor(
     readonly compound: Compound,
@@ -124,6 +184,27 @@ export class SkateWorld implements SimWorld {
     this.prevButton = 0;
     this.transitions = 0;
     this.landings = 0;
+    this.bails = 0;
+    this.holdTime = 0;
+    this.popTimer = 0;
+    this.popCharge = 0;
+    this.coyote = 0;
+    this.lastGroundNormal.set(0, 1, 0);
+    this.trick = OLLIE;
+    this.spinRate = 0;
+    this.spinRemaining = 0;
+    this.spinDir = 0;
+    this.trickRate = 0;
+    this.pitch = 0;
+    this.flip = 0;
+    this.shuv = 0;
+    this.flipTarget = 0;
+    this.shuvTarget = 0;
+    this.grabbing = false;
+    this.landingPredicted = false;
+    this.predSurface = -1;
+    this.lastMisalignDeg = 0;
+    this.bailTimer = 0;
 
     // Find the surface under the spawn point.
     this.current = -1;
@@ -178,22 +259,52 @@ export class SkateWorld implements SimWorld {
     return this.current >= 0 ? this.compound.surfaces[this.current].id : 'air';
   }
 
+  get grounded(): boolean {
+    return this.state === SkateState.Riding || this.state === SkateState.Pushing;
+  }
+
   step(input: InputFrame, dt: number): void {
     this.board.beginStep();
     this.pelvis.beginStep();
     this.simTime += dt;
-    if (input.button && !this.prevButton) this.lastPress = this.simTime;
-    this.prevButton = input.button;
 
-    if (this.state === SkateState.Air) {
-      this.stepAir(dt);
-    } else {
-      this.stepSteering(input, dt);
-      this.stepEnergy(input, dt);
-      this.stepPush(input, dt);
-      this.pos.addScaledVector(this.tangent, this.speed * dt);
-      this.distance += Math.abs(this.speed) * dt;
-      if (this.constrain(dt)) this.checkDetach();
+    // Button edges. Press timing feeds the pump; release length decides tap vs ollie.
+    const pressed = input.button && !this.prevButton;
+    const released = !input.button && this.prevButton;
+    this.prevButton = input.button;
+    if (pressed) {
+      this.lastPress = this.simTime;
+      this.holdTime = 0;
+      if (this.state === SkateState.Air) this.grabbing = true;
+    }
+    if (input.button) this.holdTime += dt;
+    if (released) {
+      this.grabbing = false;
+      if (this.holdTime >= T.tapHold) {
+        if (this.grounded) this.startPop(input);
+        else if (this.state === SkateState.Air && this.coyote > 0) this.coyotePop(input);
+      }
+    }
+
+    switch (this.state) {
+      case SkateState.Riding:
+      case SkateState.Pushing:
+        this.stepSteering(input, dt);
+        this.stepEnergy(input, dt);
+        this.stepPush(input, dt);
+        this.pos.addScaledVector(this.tangent, this.speed * dt);
+        this.distance += Math.abs(this.speed) * dt;
+        if (this.constrain(dt)) this.checkDetach();
+        break;
+      case SkateState.Pop:
+        this.stepPop(dt);
+        break;
+      case SkateState.Air:
+        this.stepAir(input, dt);
+        break;
+      case SkateState.Bailed:
+        this.stepBail(dt);
+        break;
     }
     this.stepBody(input, dt);
     this.writeBodies();
@@ -215,14 +326,11 @@ export class SkateWorld implements SimWorld {
 
   // --- energy: gravity, weight shift, friction, pump ------------------------------------------
   private stepEnergy(input: InputFrame, dt: number): void {
-    // Gravity split: only the tangential component acts. This is what makes dropping in work.
     this.speed += -T.gravity * this.tangent.y * dt;
     this.speed += input.stickY * T.weightShiftAccel * dt;
     this.speed -= this.speed * T.rollFriction * dt;
     if (this.normal.y > 0.99 && Math.abs(this.speed) < T.restSpeed) this.speed = 0;
 
-    // Pumping. A pass begins when curvature rises above the threshold; a button press within
-    // the window around that moment earns the full factor, otherwise the auto factor.
     const k = this.curvature;
     const inTrans = k > T.pumpCurvatureMin;
     if (inTrans && !this.inTransition) {
@@ -239,10 +347,6 @@ export class SkateWorld implements SimWorld {
     if (!inTrans && this.inTransition) this.transitions++;
     this.inTransition = inTrans;
     if (inTrans) {
-      // Energy injected per second ∝ κ·v (the document's rule), so acceleration ∝ κ alone: every
-      // pass through a transition adds a fixed amount of energy regardless of speed. Rolling
-      // friction (∝ v) then gives a stable equilibrium instead of a runaway. Faded out near rest
-      // so a stalled skater high on the wall isn't shoved.
       const sp = Math.abs(this.speed);
       const ramp = sp >= T.pumpMinSpeed ? 1 : sp / T.pumpMinSpeed;
       const a = T.pumpEff * Math.min(k, T.pumpCurvatureCap) * this.pumpFactor * ramp;
@@ -279,11 +383,6 @@ export class SkateWorld implements SimWorld {
   }
 
   // --- constrain to the manifold ----------------------------------------------------------------
-  /**
-   * Project the centre onto the current surface and its declared neighbours; pick who claims
-   * us; clamp the frame's rotation; offset by ride height along the normal; read pitch from
-   * nose/tail probes. Project first, then offset. Never the reverse.
-   */
   private constrain(dt: number): boolean {
     const c = this.compound;
     const nb = c.neighbours[this.current];
@@ -292,13 +391,11 @@ export class SkateWorld implements SimWorld {
 
     if (cur.margin >= -T.boundsSlack) {
       chosen = cur;
-      // Overlap case: a neighbour we have sunk into by the hysteresis depth takes over.
       for (let i = 0; i < nb.length; i++) {
         const r = c.project(nb[i], this.pos, i + 1);
         if (r.margin >= -T.boundsSlack && r.h < chosen.h - T.handoffPenetration && r.h > -T.landMaxPenetration) chosen = r;
       }
     } else {
-      // Past our edge: hand off to the neighbour that claims us most confidently.
       let bestMargin = -Infinity;
       for (let i = 0; i < nb.length; i++) {
         const r = c.project(nb[i], this.pos, i + 1);
@@ -310,24 +407,19 @@ export class SkateWorld implements SimWorld {
     }
 
     if (!chosen) {
-      this.toAir();
+      this.toAir(true);
       return false;
     }
     this.current = chosen.surface;
-
-    // Rotate the frame normal toward the surface normal, at most frameMaxRate·dt.
     this.rotateNormalToward(chosen.normal, T.frameMaxRate * dt);
     this.pos.copy(chosen.point).addScaledVector(this.normal, T.rideHeight);
 
-    // Pitch from nose/tail probes, each projected onto whichever candidate claims it best.
     this.probePoint(T.probeReach, this.pNose);
     this.probePoint(-T.probeReach, this.pTail);
     this.tmp.subVectors(this.pNose, this.pTail);
     this.tmp.addScaledVector(this.normal, -this.tmp.dot(this.normal));
     if (this.tmp.lengthSq() > 1e-8) this.tangent.copy(this.tmp).normalize();
-    else {
-      this.tangent.addScaledVector(this.normal, -this.tangent.dot(this.normal)).normalize();
-    }
+    else this.tangent.addScaledVector(this.normal, -this.tangent.dot(this.normal)).normalize();
     this.binormal.crossVectors(this.tangent, this.normal).normalize();
 
     this.curvature = c.surfaces[this.current].curvature(chosen.u, chosen.v, this.tangent);
@@ -335,7 +427,6 @@ export class SkateWorld implements SimWorld {
     return true;
   }
 
-  /** Probe point along the tangent, projected onto the best-claiming surface among current + neighbours. */
   private probePoint(along: number, out: Vector3): void {
     const c = this.compound;
     this.probe.copy(this.pos).addScaledVector(this.tangent, along);
@@ -352,29 +443,28 @@ export class SkateWorld implements SimWorld {
     }
   }
 
+  /** Rotate the whole frame so that `normal` moves toward `target`, at most `maxAngle`. */
   private rotateNormalToward(target: Vector3, maxAngle: number): void {
     const d = Math.min(1, Math.max(-1, this.normal.dot(target)));
     const angle = Math.acos(d);
     if (angle < 1e-6) return;
     this.axis.crossVectors(this.normal, target);
-    if (this.axis.lengthSq() < 1e-12) {
-      // Antiparallel: pick any perpendicular axis.
-      this.axis.crossVectors(this.normal, this.tangent);
-    }
+    if (this.axis.lengthSq() < 1e-12) this.axis.crossVectors(this.normal, this.tangent);
     this.axis.normalize();
-    const a = Math.min(angle, maxAngle);
-    this.q.setFromAxisAngle(this.axis, a);
+    this.q.setFromAxisAngle(this.axis, Math.min(angle, maxAngle));
     this.normal.applyQuaternion(this.q).normalize();
     this.tangent.applyQuaternion(this.q);
+    this.binormal.crossVectors(this.tangent, this.normal).normalize();
   }
 
-  /** Detach when the surface would have to pull on us to keep us on it. */
   private checkDetach(): void {
     this.normalForce = this.curvature * this.speed * this.speed + T.gravity * this.normal.y;
-    if (this.normalForce < -T.detachSlack) this.toAir();
+    if (this.normalForce < -T.detachSlack) this.toAir(true);
   }
 
-  private toAir(): void {
+  /** Leave the surface. `withCoyote` when it wasn't a pop, so a late release still pops. */
+  private toAir(withCoyote: boolean): void {
+    this.lastGroundNormal.copy(this.normal);
     this.state = SkateState.Air;
     this.current = -1;
     this.vel.copy(this.tangent).multiplyScalar(this.speed);
@@ -383,87 +473,348 @@ export class SkateWorld implements SimWorld {
     this.inTransition = false;
     this.curvature = 0;
     this.normalForce = 0;
+    this.coyote = withCoyote ? T.coyoteTime : 0;
+    this.landingPredicted = false;
+    this.headingAssisting = false;
+    this.spinRate = 0;
+    this.spinRemaining = 0;
   }
 
-  // --- air: ballistic, then land on whatever we hit --------------------------------------------
-  private stepAir(dt: number): void {
+  // --- pop: tail down, then leave along the normal ----------------------------------------------
+  private startPop(input: InputFrame): void {
+    this.state = SkateState.Pop;
+    this.popTimer = 0;
+    this.popCharge = this.charge;
+    this.selectTrick(input);
+    this.vel.copy(this.tangent).multiplyScalar(this.speed);
+    this.pushPhase = 0;
+  }
+
+  private stepPop(dt: number): void {
+    this.popTimer += dt;
+    this.pitch = T.popPitch * Math.min(1, this.popTimer / T.popDuration);
+    this.pos.addScaledVector(this.tangent, this.speed * dt);
+    if (this.popTimer >= T.popDuration) {
+      this.lastGroundNormal.copy(this.normal);
+      const h = T.ollieMinHeight + (T.ollieMaxHeight - T.ollieMinHeight) * this.popCharge;
+      const vPop = Math.sqrt(2 * T.gravity * h);
+      this.vel.copy(this.tangent).multiplyScalar(this.speed).addScaledVector(this.normal, vPop);
+      this.current = -1;
+      this.state = SkateState.Air;
+      this.airTime = 0;
+      this.coyote = 0;
+      this.inTransition = false;
+      this.curvature = 0;
+      this.landingPredicted = false;
+      this.headingAssisting = false;
+      this.pelvisV += T.pelvisPopKick;
+      this.armTrick();
+    }
+  }
+
+  /** A release inside the coyote window after leaving a lip without popping. */
+  private coyotePop(input: InputFrame): void {
+    this.selectTrick(input);
+    const h = T.ollieMinHeight + (T.ollieMaxHeight - T.ollieMinHeight) * this.charge;
+    const vPop = Math.sqrt(2 * T.gravity * h);
+    this.vel.addScaledVector(this.lastGroundNormal, vPop);
+    this.pitch = T.popPitch;
+    this.coyote = 0;
+    this.pelvisV += T.pelvisPopKick;
+    this.armTrick();
+  }
+
+  /** Stick direction at the moment of takeoff picks from the 8-way rose. */
+  private selectTrick(input: InputFrame): void {
+    const mag = Math.hypot(input.stickX, input.stickY);
+    if (mag < T.trickDeadzone) {
+      this.trick = OLLIE;
+      return;
+    }
+    let a = Math.atan2(input.stickY, input.stickX);
+    if (a < 0) a += 2 * Math.PI;
+    const idx = Math.round(a / (Math.PI / 4)) % 8;
+    this.trick = ROSE[idx];
+  }
+
+  /** Set rotation rates so the trick completes inside the predicted air time. */
+  private armTrick(): void {
+    const tAir = Math.max(T.minTrickTime, (2 * Math.max(0, this.vel.y)) / T.gravity);
+    const tTrick = Math.max(T.minTrickTime, tAir * T.trickTimeFraction);
+    const t = this.trick;
+    this.trickRate = (Math.max(Math.abs(t.spin), Math.abs(t.flip), Math.abs(t.shuv), Math.PI) / tTrick);
+    this.spinRemaining = Math.abs(t.spin);
+    this.spinDir = Math.sign(t.spin);
+    this.flip = 0;
+    this.shuv = 0;
+    this.flipTarget = t.flip;
+    this.shuvTarget = t.shuv;
+  }
+
+  // --- air: ballistic, spin, predict the landing, land ----------------------------------------
+  private stepAir(input: InputFrame, dt: number): void {
     this.vel.y -= T.gravity * dt;
     this.pos.addScaledVector(this.vel, dt);
     this.airTime += dt;
+    if (this.coyote > 0) this.coyote -= dt;
     if (this.pos.y < -30) {
       this.reset();
       return;
     }
-    if (this.airTime < 0.02) return;
 
-    const c = this.compound;
-    const n = c.query(this.pos, this.cand);
+    // Body spin about world up: first the trick's own spin, then whatever the stick asks for.
+    // The trick's own spin is owed and always completes; a grab only damps the extra spin the
+    // stick asks for, and nothing extra is added once a landing is predicted.
+    let rate = 0;
+    if (this.spinRemaining > 0) {
+      rate = this.spinDir * this.trickRate;
+      this.spinRemaining -= this.trickRate * dt;
+    } else if (Math.abs(input.stickX) > 0.5 && !this.headingAssisting) {
+      rate = -Math.sign(input.stickX) * T.heldSpinRate * (this.grabbing ? T.grabSpinDamping : 1);
+    }
+    this.spinRate = rate;
+    if (rate !== 0) {
+      // Spin about the body axis (the frame normal). On the flat that is world up; off a vert
+      // wall it is the wall normal, which is what turns "up the wall" into "down the wall".
+      this.q.setFromAxisAngle(this.normal, rate * dt);
+      this.tangent.applyQuaternion(this.q);
+      this.binormal.crossVectors(this.tangent, this.normal).normalize();
+    }
+
+    // Board-relative trick channels advance toward their targets and stop (the catch).
+    this.flip = approach(this.flip, this.flipTarget, this.trickRate * dt);
+    this.shuv = approach(this.shuv, this.shuvTarget, this.trickRate * dt);
+    this.pitch *= Math.exp(-dt / T.pitchDecayTau);
+
+    // Landing prediction. Two horizons: the heading assist starts early so a spin can finish to
+    // the nearest 0/180 at a sane rate; the frame normal blends onto the surface in the last
+    // 120 ms so the touchdown looks intentional. The normal is otherwise frozen in the air:
+    // levelling it toward world-up and then rotating it back onto a wall twisted the heading.
+    // Steep surfaces count here: coming back down a vert wall you cannot land on it, but it is
+    // still the surface you are aligning to.
+    const headingAhead = this.predictSurface(T.headingLookahead, true);
+    this.landingPredicted = false;
+    this.headingAssisting = headingAhead !== null;
+    if (headingAhead) {
+      this.predSurface = headingAhead.surface;
+      // The assist takes over any rotation still owed by the trick, or the two would overshoot.
+      this.spinRemaining = 0;
+      // Rate-based: any residual inside the reach closes within the lookahead.
+      this.alignHeadingToVelocity(headingAhead.normal, ((Math.PI / 2) / T.headingLookahead) * dt);
+    }
+    const ahead = this.predictSurface(T.landLookahead);
+    if (ahead) {
+      this.landingPredicted = true;
+      this.predNormal.copy(ahead.normal);
+      this.predSurface = ahead.surface;
+      const step = (Math.PI / T.landLookahead) * dt;
+      this.rotateNormalToward(this.predNormal, step);
+      this.flip = approach(this.flip, this.flip - residual(this.flip, 2 * Math.PI), step);
+      this.shuv = approach(this.shuv, this.shuv - residual(this.shuv, Math.PI), step);
+      this.flipTarget = this.flip;
+      this.shuvTarget = this.shuv;
+      this.pitch *= Math.exp(-dt / (T.pitchDecayTau * 0.5));
+    }
+
+    if (this.airTime < 0.02) return;
+    const n = this.compound.query(this.pos, this.cand);
     let best: ProjectResult | null = null;
     for (let i = 0; i < n; i++) {
-      const r = c.project(this.cand[i], this.pos, i);
+      const r = this.compound.project(this.cand[i], this.pos, i);
       if (r.margin < -T.boundsSlack) continue;
       if (r.h > T.landMaxHeight || r.h < -T.landMaxPenetration) continue;
       if (r.normal.y < T.landMinNormalY) continue;
-      // Land if we are moving into the surface, or have already crossed it (a grazing approach
-      // can have velocity pointing away from a concave surface while still passing through it).
       if (r.h >= 0 && this.vel.dot(r.normal) >= 0) continue;
       if (!best || r.h > best.h) best = r;
     }
-    if (best) this.land(best);
+    if (best) this.land(best, input);
   }
 
-  private land(r: ProjectResult): void {
-    this.current = r.surface;
-    this.landings++;
+  /** The surface we would touch `tau` seconds from now on the current ballistic arc, or null. */
+  private predictSurface(tau: number, allowSteep = false): ProjectResult | null {
+    this.tmp.copy(this.pos).addScaledVector(this.vel, tau);
+    this.tmp.y -= 0.5 * T.gravity * tau * tau;
+    // The predicted point may be well below the surface we are about to hit: allow as much
+    // penetration as we travel in the look-ahead. A fixed 0.6 m switched the assist off exactly
+    // when falls got fast.
+    const travel = this.vel.length() * tau + 0.5 * T.gravity * tau * tau;
+    const maxPen = Math.max(T.landMaxPenetration, travel * 1.5 + 0.3);
+    const n = this.compound.query(this.tmp, this.cand);
+    let best: ProjectResult | null = null;
+    for (let i = 0; i < n; i++) {
+      const r = this.compound.project(this.cand[i], this.tmp, i);
+      if (r.margin < -T.boundsSlack) continue;
+      if (!allowSteep && r.normal.y < T.landMinNormalY) continue;
+      if (r.h > T.landMaxHeight || r.h < -maxPen) continue;
+      if (r.h >= 0 && this.vel.dot(r.normal) >= 0) continue;
+      if (!best || r.h > best.h) best = r;
+    }
+    return best;
+  }
+
+  /**
+   * Landing alignment, started early: rotate the heading about `n` toward the direction of
+   * travel (mod 180°, so fakie landings stay fakie) by at most `maxStep`, but only when the
+   * residual is inside the assist reach. Beyond it the skater is genuinely sideways and will bail.
+   */
+  private alignHeadingToVelocity(n: Vector3, maxStep: number): void {
+    this.tmp.copy(this.vel).addScaledVector(n, -this.vel.dot(n));
+    if (this.tmp.lengthSq() < 0.09) return;
+    this.tmp.normalize();
+    this.tmp2.copy(this.tangent).addScaledVector(n, -this.tangent.dot(n));
+    if (this.tmp2.lengthSq() < 1e-6) return;
+    this.tmp2.normalize();
+    let d = this.tmp.dot(this.tmp2);
+    if (d < 0) {
+      this.tmp.negate();
+      d = -d;
+    }
+    const angle = Math.acos(Math.min(1, d));
+    if (angle < 1e-4 || angle > T.headingAssistMax) return;
+    // Signed angle about n from heading to travel direction.
+    this.axis.crossVectors(this.tmp2, this.tmp);
+    const sgn = this.axis.dot(n) >= 0 ? 1 : -1;
+    this.q.setFromAxisAngle(n, sgn * Math.min(angle, maxStep));
+    this.tangent.applyQuaternion(this.q);
+    this.normal.applyQuaternion(this.q);
+    this.binormal.crossVectors(this.tangent, this.normal).normalize();
+  }
+
+  private land(r: ProjectResult, input: InputFrame): void {
     const n = r.normal;
     const vn = this.vel.dot(n);
-    // Tangential velocity survives; the normal part is absorbed (Phase 3 refines this).
+    // Tangential velocity survives; the normal part is absorbed.
     this.tmp.copy(this.vel).addScaledVector(n, -vn);
     const vt = this.tmp.length();
-    // Old heading projected onto the new plane decides regular vs fakie.
+    // Board heading projected onto the new plane.
     this.tmp2.copy(this.tangent).addScaledVector(n, -this.tangent.dot(n));
     if (this.tmp2.lengthSq() < 1e-6) this.tmp2.copy(this.tmp);
     this.tmp2.normalize();
+
+    // Misalignment between the board's long axis and the direction of travel, mod 180°.
+    let mis = 0;
+    let fakie = false;
     if (vt > 0.3) {
       this.tmp.divideScalar(vt);
-      if (this.tmp.dot(this.tmp2) >= 0) {
-        this.tangent.copy(this.tmp);
-        this.speed = vt;
-      } else {
-        this.tangent.copy(this.tmp).negate();
-        this.speed = -vt;
+      const d = this.tmp.dot(this.tmp2);
+      fakie = d < 0;
+      mis = Math.acos(Math.min(1, Math.abs(d)));
+    }
+    const flipRes = Math.abs(residual(this.flip, 2 * Math.PI));
+    const shuvRes = Math.abs(residual(this.shuv, Math.PI));
+    this.lastMisalignDeg = mis / D;
+
+    if (mis > T.landBailAngle || flipRes > T.landBailAngle || shuvRes > T.landBailAngle) {
+      this.bail(r, vt > 0.3 ? this.tmp : this.tmp2, n);
+      return;
+    }
+
+    this.current = r.surface;
+    this.landings++;
+    // Catch: board seats on the nearest clean orientation.
+    this.flip -= residual(this.flip, 2 * Math.PI);
+    this.shuv -= residual(this.shuv, Math.PI);
+    this.flipTarget = this.flip;
+    this.shuvTarget = this.shuv;
+    this.pitch = 0;
+
+    let speed: number;
+    if (vt > 0.3) {
+      // Heading snaps to velocity. Past the snap angle the landing is sketchy and scrubs speed.
+      this.tangent.copy(this.tmp);
+      if (fakie) this.tangent.negate();
+      speed = fakie ? -vt : vt;
+      if (mis > T.landSnapAngle) {
+        speed *= 1 - (0.5 * (mis - T.landSnapAngle)) / (T.landBailAngle - T.landSnapAngle);
       }
     } else {
       this.tangent.copy(this.tmp2);
-      this.speed = 0;
+      speed = 0;
     }
+    // Landing in a transition rewards you: a sliver of the absorbed normal speed rolls forward.
+    speed += Math.sign(speed || 1) * Math.abs(vn) * T.landVerticalToForward * (1 - Math.max(0, n.y));
+
+    // Auto-revert: landing fakie silently turns the board round unless the button is held.
+    if (speed < 0 && !input.button) {
+      this.tangent.negate();
+      speed = -speed;
+    }
+    this.speed = speed;
     this.normal.copy(n);
+    this.tangent.addScaledVector(n, -this.tangent.dot(n)).normalize();
     this.binormal.crossVectors(this.tangent, this.normal).normalize();
     this.pos.copy(r.point).addScaledVector(n, T.rideHeight);
     this.vel.copy(this.tangent).multiplyScalar(this.speed);
     this.curvature = this.compound.surfaces[this.current].curvature(r.u, r.v, this.tangent);
     this.state = SkateState.Riding;
     this.airTime = 0;
+    this.grabbing = false;
+    this.spinRate = 0;
+    this.landingPredicted = false;
+    this.headingAssisting = false;
     this.pelvisV += vn * T.landPelvisKick;
+  }
+
+  // --- bail: down for a moment, then back on the board ---------------------------------------
+  private bail(r: ProjectResult, dir: Vector3, n: Vector3): void {
+    this.state = SkateState.Bailed;
+    this.bails++;
+    this.bailTimer = 0;
+    this.current = r.surface;
+    this.normal.copy(n);
+    this.tangent.copy(dir).addScaledVector(n, -dir.dot(n)).normalize();
+    this.binormal.crossVectors(this.tangent, this.normal).normalize();
+    this.pos.copy(r.point).addScaledVector(n, T.rideHeight);
+    this.speed = this.vel.length() * 0.3;
+    this.vel.copy(this.tangent).multiplyScalar(this.speed);
+    this.flip = 0;
+    this.shuv = 0;
+    this.flipTarget = 0;
+    this.shuvTarget = 0;
+    this.pitch = 0;
+    this.grabbing = false;
+    this.spinRate = 0;
+    this.landingPredicted = false;
+    this.headingAssisting = false;
+    this.pelvisV = -3;
+  }
+
+  private stepBail(dt: number): void {
+    this.bailTimer += dt;
+    this.speed *= Math.max(0, 1 - T.bailDecay * dt);
+    this.speed += -T.gravity * this.tangent.y * dt;
+    this.pos.addScaledVector(this.tangent, this.speed * dt);
+    if (this.constrain(dt) && this.bailTimer >= T.bailDuration) {
+      this.state = SkateState.Riding;
+      this.charge = 0;
+    }
   }
 
   // --- body on the board: charge, lean, weight, pelvis spring -----------------------------------
   private stepBody(input: InputFrame, dt: number): void {
-    if (input.button) this.charge = Math.min(1, this.charge + dt / T.chargeUpTime);
+    const inAir = this.state === SkateState.Air;
+    if (input.button && !inAir) this.charge = Math.min(1, this.charge + dt / T.chargeUpTime);
     else this.charge = Math.max(0, this.charge - dt / T.chargeDownTime);
 
     const centripetal = this.speed * this.yawRate;
     let leanTarget = Math.atan2(centripetal, 9.81);
     if (leanTarget > T.leanMax) leanTarget = T.leanMax;
     else if (leanTarget < -T.leanMax) leanTarget = -T.leanMax;
-    if (this.state === SkateState.Air) leanTarget = 0;
+    if (inAir || this.state === SkateState.Pop) leanTarget = 0;
+    if (this.state === SkateState.Bailed) leanTarget = 1.2;
     this.lean += (leanTarget - this.lean) * Math.min(1, T.leanRate * dt);
 
     this.weight += (input.stickY - this.weight) * Math.min(1, 12 * dt);
 
-    // Pelvis spring: crouch, speed, and centripetal load through transitions.
-    const load = this.state === SkateState.Air ? 0 : Math.min(0.3, Math.max(0, this.curvature * this.speed * this.speed * T.pelvisCurvatureCrouch));
-    const target = T.pelvisStand - this.charge * T.pelvisCrouch - Math.abs(this.speed) * T.pelvisSpeedCrouch - load;
+    let target: number;
+    if (this.state === SkateState.Bailed) {
+      target = 0.3;
+    } else if (inAir) {
+      target = T.pelvisStand - (this.grabbing ? T.grabTuck : 0);
+    } else {
+      const load = Math.min(0.3, Math.max(0, this.curvature * this.speed * this.speed * T.pelvisCurvatureCrouch));
+      target = T.pelvisStand - this.charge * T.pelvisCrouch - Math.abs(this.speed) * T.pelvisSpeedCrouch - load;
+    }
     const w = T.pelvisOmega;
     const accel = w * w * (target - this.pelvisH) - 2 * T.pelvisZeta * w * this.pelvisV;
     this.pelvisV += accel * dt;
@@ -479,7 +830,14 @@ export class SkateWorld implements SimWorld {
     b.pos.copy(this.pos);
     this.tmp.copy(this.tangent).negate();
     this.mat.makeBasis(this.binormal, this.normal, this.tmp);
-    b.rot.setFromRotationMatrix(this.mat);
+    this.q.setFromRotationMatrix(this.mat); // frame
+    // Board-relative: shuv about local Y, pitch about local X, flip about local Z (long axis).
+    this.q2.set(0, Math.sin(this.shuv / 2), 0, Math.cos(this.shuv / 2));
+    this.q3.set(Math.sin(this.pitch / 2), 0, 0, Math.cos(this.pitch / 2));
+    this.q2.multiply(this.q3);
+    this.q3.set(0, 0, Math.sin(this.flip / 2), Math.cos(this.flip / 2));
+    this.q2.multiply(this.q3);
+    b.rot.copy(this.q).multiply(this.q2);
 
     const p = this.pelvis.curr;
     const h = this.pelvisH;
@@ -489,25 +847,33 @@ export class SkateWorld implements SimWorld {
       .addScaledVector(this.normal, h * Math.cos(this.lean))
       .addScaledVector(this.binormal, side)
       .addScaledVector(this.tangent, this.weight * T.weightShiftPelvis);
-    this.q.setFromAxisAngle(this.tangent, this.lean);
-    p.rot.copy(this.q).multiply(b.rot);
+    this.q2.setFromAxisAngle(this.tangent, this.lean);
+    p.rot.copy(this.q2).multiply(this.q);
   }
 
   debugReport(kv: (key: string, value: string | number) => void): void {
-    kv('state', this.state);
+    kv('state', this.state + (this.grabbing ? ' grab' : ''));
     kv('surface', this.surfaceId);
     kv('speed', `${this.speed.toFixed(2)} u/s`);
-    kv('curv', `${this.curvature.toFixed(3)} /m`);
-    kv('N', `${this.normalForce.toFixed(1)} m/s²`);
+    kv('trick', `${this.trick.name}  spin ${(this.spinRate / D).toFixed(0)}°/s`);
+    kv('board', `flip ${(this.flip / D).toFixed(0)}°  shuv ${(this.shuv / D).toFixed(0)}°  pitch ${(this.pitch / D).toFixed(0)}°`);
+    kv('air', `${this.airTime.toFixed(2)} s  coyote ${this.coyote > 0 ? this.coyote.toFixed(2) : '—'}  land→ ${this.landingPredicted ? this.compound.surfaces[this.predSurface].id : '—'}`);
+    kv('landings', `${this.landings}  bails ${this.bails}  last mis ${this.lastMisalignDeg.toFixed(0)}°`);
+    kv('curv', `${this.curvature.toFixed(3)} /m  N ${this.normalForce.toFixed(1)}`);
     kv('pump', this.inTransition ? `${this.pumpFactor.toFixed(1)} (${this.transitions})` : `— (${this.transitions})`);
-    kv('air', `${this.airTime.toFixed(2)} s  landings ${this.landings}`);
     kv('yawRate', `${this.yawRate.toFixed(2)} rad/s`);
     kv('normal', `${this.normal.x.toFixed(2)} ${this.normal.y.toFixed(2)} ${this.normal.z.toFixed(2)}`);
-    kv('tangent', `${this.tangent.x.toFixed(2)} ${this.tangent.y.toFixed(2)} ${this.tangent.z.toFixed(2)}`);
-    kv('charge', this.charge.toFixed(2));
+    kv('charge', `${this.charge.toFixed(2)}  hold ${this.holdTime.toFixed(2)}`);
     kv('push', this.pushPhase.toFixed(2));
-    kv('lean', `${((this.lean * 180) / Math.PI).toFixed(1)}°`);
+    kv('lean', `${(this.lean / D).toFixed(1)}°`);
     kv('pelvis', this.pelvisH.toFixed(2));
     kv('odometer', `${this.distance.toFixed(0)} m`);
   }
+}
+
+/** Move `a` toward `target` by at most `step`. */
+function approach(a: number, target: number, step: number): number {
+  const d = target - a;
+  if (Math.abs(d) <= step) return target;
+  return a + Math.sign(d) * step;
 }

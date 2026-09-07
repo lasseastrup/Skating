@@ -11,7 +11,7 @@ import {
 } from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { applyInterpolated } from '../core/Interp';
-import type { SkateWorld } from '../sim/SkateWorld';
+import { SkateState, type SkateWorld } from '../sim/SkateWorld';
 import { TUNING as T } from '../sim/Tuning';
 
 const DECK_MAT = new MeshLambertMaterial({ color: 0x3a3a3a });
@@ -40,6 +40,7 @@ export class SkaterPlaceholder {
   private readonly foot = new Vector3();
   private readonly dir = new Vector3();
   private readonly q = new Quaternion();
+  private readonly feetAnchor = new Vector3();
 
   constructor(private readonly world: SkateWorld) {
     // Deck + trucks + wheels as one merged geometry: one draw call for the whole board.
@@ -81,12 +82,21 @@ export class SkaterPlaceholder {
     applyInterpolated(w.board, this.board, alpha);
     applyInterpolated(w.pelvis, this.pelvis, alpha);
 
-    // Board-space axes from the displayed (interpolated) board rotation.
-    const bq = this.board.quaternion;
+    // Foot goals live in board space. Mid-trick the board flips under the body, so while a
+    // rotation is unfinished the feet hold the body frame (pelvis rotation, lean is ~0 in the
+    // air) and re-seat when the board catches. Phase 6 does this per foot with IK weights.
+    const midTrick = w.state === SkateState.Air && (Math.abs(w.flip) % (2 * Math.PI) > 0.1 || Math.abs(w.shuv) % Math.PI > 0.1);
+    const bq = midTrick ? this.pelvis.quaternion : this.board.quaternion;
     this.right.set(1, 0, 0).applyQuaternion(bq);
     this.up.set(0, 1, 0).applyQuaternion(bq);
     this.fwd.set(0, 0, -1).applyQuaternion(bq);
 
+    // In the air the feet hang from where the board *would* be under the body frame.
+    this.feetAnchor.copy(this.pelvis.position).addScaledVector(this.up, -(w.pelvisH));
+    if (midTrick) {
+      // Keep the feet a little above the flipping deck.
+      this.feetAnchor.addScaledVector(this.up, 0.06);
+    }
     // Front foot = +along (regular stance, left foot forward). Back foot does the pushing.
     this.solveLeg(0, T.footAlong, -T.footAcross, 0.09, 0);
     this.solveLeg(1, -T.footAlong, T.footAcross, -0.09, w.pushPhase);
@@ -97,7 +107,7 @@ export class SkaterPlaceholder {
    * `push` (0..1) swings the foot off the deck to the ground and strokes it back.
    */
   private solveLeg(i: number, along: number, across: number, hipSide: number, push: number): void {
-    const bp = this.board.position;
+    const bp = this.world.state === SkateState.Air ? this.feetAnchor : this.board.position;
     this.foot.copy(bp).addScaledVector(this.fwd, along).addScaledVector(this.right, across).addScaledVector(this.up, 0.01);
 
     if (push > 0) {

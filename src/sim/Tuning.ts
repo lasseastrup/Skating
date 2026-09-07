@@ -112,4 +112,43 @@ export const TUNING = {
   pelvisCurvatureCrouch: 0.012,
   /** Pushing is only allowed where curvature is below this. */
   pushMaxCurvature: 0.05,
+
+  // --- Phase 3: air ------------------------------------------------------------------------------
+  /** Ollie height at zero and full charge. Release below `tapHold` is a pump tap, not an ollie. */
+  ollieMinHeight: 0.4,
+  ollieMaxHeight: 1.4,
+  tapHold: 0.12,
+  /** Pop: the board pitches tail-down for this long before leaving the ground. */
+  popDuration: 0.04,
+  popPitch: (18 * Math.PI) / 180,
+  /** Board pitch decays with this time constant in the air (the ollie levels out). */
+  pitchDecayTau: 0.12,
+  /** Upward pelvis velocity kick at pop. */
+  pelvisPopKick: 3.2,
+  /** Coyote time: a release this soon after leaving a lip still pops. */
+  coyoteTime: 0.1,
+  /** Trick rotations complete in this fraction of the predicted air time, never faster than minTrickTime. */
+  trickTimeFraction: 0.8,
+  minTrickTime: 0.3,
+  /** Body spin while the stick is held in the air, after the trick's own spin is done. */
+  heldSpinRate: (360 * Math.PI) / 180,
+  /** Stick magnitude below this at takeoff selects a plain ollie. */
+  trickDeadzone: 0.35,
+  /** Grab: spin multiplier while holding, and pelvis tuck. */
+  grabSpinDamping: 0.5,
+  grabTuck: 0.28,
+  /** Landing: look this far ahead and blend the frame normal onto the predicted surface. */
+  landLookahead: 0.12,
+  /** Heading alignment starts earlier so a held spin can finish to the nearest 0/180 in time. */
+  headingLookahead: 0.25,
+  /** Heading residuals beyond this at prediction time are left alone: the skater is sideways. */
+  headingAssistMax: (88 * Math.PI) / 180,
+  /** Heading snaps to velocity within this; beyond bailAngle we bail; between, speed is scrubbed. */
+  landSnapAngle: (45 * Math.PI) / 180,
+  landBailAngle: (70 * Math.PI) / 180,
+  /** Fraction of absorbed normal speed converted to forward speed, scaled by how un-flat the surface is. */
+  landVerticalToForward: 0.12,
+  /** Bail: how long the skater is down, and speed decay per second while down. */
+  bailDuration: 0.9,
+  bailDecay: 4,
 } as const;

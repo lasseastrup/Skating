@@ -5,6 +5,104 @@ overlay (4-finger tap, backquote key, or `?debug=1`).
 
 ---
 
+## Phase 3 — Air
+
+**Status:** complete. Ollie, trick rose, spin, grab, coyote time, predictive landing alignment,
+auto-revert and a minimal bail. Determinism holds. Scripted: 40/40 half-pipe airs with held spin,
+48/48 trick pops off the lip, every flat trick lands at 0° misalignment.
+
+### What was built
+
+| Area | File | Note |
+|---|---|---|
+| States | `src/sim/SkateWorld.ts` | Riding, Pushing, **Pop**, **Air**, **Bailed** (Skater XL names; Setup/BeginPop/Release/Impact split comes in Phase 6) |
+| Ollie | | Release after a hold ≥ 120 ms. Height 0.4 + 1.0·charge (clamped 0.4–1.4 m). 40 ms pop with tail-down pitch, then leave along the surface normal |
+| Trick rose | | 8 wedges by stick angle at takeoff: fs/bs 180, kickflip, 360 shuv and the four diagonal combos. Deadzone 0.35 = plain ollie |
+| Channels | | Body **spin** about the frame normal; board-relative **flip** (long axis), **shuv** (normal) and **pitch** (right axis). Rates set so the trick completes in 80% of predicted air time |
+| Held spin | | Stick held in the air after the trick adds 360°/s until the landing assist starts |
+| Grab | | Button pressed in the air: halves held spin, tucks the pelvis. Never damps the trick's own spin |
+| Coyote | | 100 ms after leaving a lip without popping, a release still pops along the last ground normal |
+| Landing | | Two horizons: heading aligns to velocity (mod 180) from 250 ms out, frame normal and flip/shuv catch from 120 ms out. Snap ≤ 45°, scrub 45–70°, bail > 70° or inverted |
+| Auto-revert | | Landing fakie silently turns the board round unless the button is held |
+| Bail | | 0.9 s down: speed ×0.3 then decays, pelvis drops, lean 70°. Phase 6 replaces with a weight ramp |
+| Placeholder | `src/render/SkaterPlaceholder.ts` | Mid-trick the feet hold the body frame instead of the flipping board |
+
+### Decisions
+
+**Tap vs ollie.** The brief has the button double as the manual pump (press timing) and the ollie
+(release). Taken literally every pump tap is also a 0.4 m hop off the bottom of the transition.
+Resolution: a release after a hold shorter than 120 ms is a tap and does not pop. The effective
+ollie range is therefore 0.74–1.37 m (charge is 0.34 at 120 ms). Flag if the 0.4 m floor matters.
+
+**Spin is about the frame normal, not world up.** On the flat that is the same axis. Off a vert
+wall the body axis is the wall normal, and spinning about it is what turns "up the wall" into
+"down the wall" (a 180 air comes back in forward). Spinning about world up on a wall tipped the
+board instead and no alignment could undo it.
+
+**The frame normal is frozen in the air.** A gentle levelling toward world up looked plausible
+but, combined with spin about the tilted normal and the rotation back onto the wall, it twisted
+the heading by an unpredictable amount (the composition of the two rotations has a net twist about
+the normal). Freezing it removed the twist; the last 120 ms blend puts the board on the surface.
+
+**Two landing horizons.** The brief's 120 ms is right for the *normal* blend: touchdown looks
+intentional and not corrected. Heading needs longer: a held spin frozen 120 ms out can be 90° from
+the nearest 0/180 and a 750°/s snap reads as a glitch. Heading alignment starts 250 ms out at
+360°/s, which covers any residual ≤ 90°. When it starts it also takes over any rotation the trick
+still owes; running both pushed past 180 and overshot.
+
+**Prediction penetration scales with fall speed.** Both horizons rejected a surface once the
+predicted point was more than 0.6 m below it. At 10 u/s the 250 ms point is 2.5 m below the
+ground, so the assist switched off precisely when falls got fast, the held spin resumed, and the
+skater landed wherever the spin left it. Every bail in the diagnostic log had "no assist active"
+on the step before contact. Penetration allowance is now 1.5× the distance travelled in the
+look-ahead, and the broadphase reach grew to match.
+
+**Steep surfaces count for heading, not for landing.** Coming back down a vert wall you cannot
+land on it (n.y < 0.15), but it is the surface you are aligning to, so the heading horizon sees it
+and alignment starts on time.
+
+**Landing rewards transitions.** A sliver of absorbed normal speed (12%, scaled by how un-flat
+the surface is) rolls forward. Nothing on the flat, a little extra in a bowl.
+
+**Bails are rare by construction.** With a 250 ms heading assist reaching 88°, the 70° contact
+rule only fires when contact was not predicted (an edge, a coping seam) or a flip is still
+mid-rotation at such a contact. That is the Assist Charter's intent: bail when genuinely upside
+down, otherwise land.
+
+### Measurements (scripted, 120 Hz, playground manifold)
+
+| Test | Result |
+|---|---|
+| Ollie, hold 0.08 / 0.15 / 0.35 / 0.6 s | no pop / 0.80 m / 1.37 m / 1.37 m. Air 0.54–0.71 s. Max per-step move 8 cm (no teleport) |
+| Kickflip, fs 180, 360 shuv, fs/bs kickflip on the flat at 7 u/s | all land, 0° misalignment, speed 6.69 preserved |
+| fs 180 with button held through landing | lands fakie at −6.69 (auto-revert suppressed) |
+| fs 180 then stick held for extra spin | lands at 0° via the assist |
+| Coyote: roll off the deck holding, release 60 ms later | pops (v_y −1.5 → +2.7); release at 250 ms does not |
+| Half-pipe, 40 airs, stick held half the time / always | **40/40** and **40/40** clean |
+| Half-pipe, 48 random trick pops off the lip (4 seeds) | **48/48** clean, worst misalignment 30° |
+| Vert launch at 14.5, hold spin whole air | lands back in the transition at 10.9 u/s |
+| 40 random drops over the park | 47 landings, 0 bails, 0 fall-throughs |
+
+### Known gaps, on purpose
+
+- **A pop off a vert lip is horizontal.** The pop goes along the surface normal, so at the lip it
+  fires you toward the flat and you land on it. Real lip tricks are coping states (Phase 4/6).
+- **Bail is a stub.** Speed drop, pelvis drop, 70° lean, 0.9 s. The per-group weight ramp is Phase 6.
+- **Feet mid-trick** hover at the body frame rather than leaving per foot (Phase 6 IK weights).
+- **Camera** still clips through ramp bodies on walls and has no air behaviour yet.
+
+### Phone checklist for this phase
+
+1. Roll on the flat, hold the right half, release. You should pop cleanly; longer hold, higher.
+   A quick tap should do nothing but pump.
+2. Release with the stick pushed up: kickflip. Right: frontside 180, and you keep rolling forward.
+   Down: 360 shuv. Diagonals combine.
+3. Hold right through a big half-pipe air. You should spin and always come back in.
+4. Roll off a deck holding the button and release just after: you pop off the edge.
+5. Press and hold the button in the air: the capsule tucks and spin slows.
+
+---
+
 ## Phase 2 — The Surface Manifold ★
 
 **Status:** complete. All four acceptance cases pass in scripted runs. Determinism holds with the
