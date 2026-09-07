@@ -102,6 +102,8 @@ function boot(): void {
     runDeterminism: (steps?: number, seed?: number) => runDeterminismTest(makeWorld, steps, seed),
     makeWorld,
     simDt: SIM_DT,
+    input,
+    frame,
   };
   (window as unknown as { __coping: unknown }).__coping = hook;
 }
