@@ -6,11 +6,11 @@ import {
   HemisphereLight,
   Mesh,
   MeshLambertMaterial,
-  Vector3,
   PlaneGeometry,
   Scene,
 } from 'three';
 import type { SimWorld } from '../core/Sim';
+import type { CameraTarget } from '../render/CameraRig';
 
 /** Shared palette. Grey on grey, per Phase 0: no art yet. */
 export const GREY_GROUND = new MeshLambertMaterial({ color: 0x6e6e6e });
@@ -24,8 +24,8 @@ export interface GameScene {
   readonly world: SimWorld;
   /** Push interpolated sim state into display objects. Called once per render frame. */
   syncVisuals(alpha: number): void;
-  /** World-space position + heading the camera should follow. */
-  cameraTarget(): { pos: Vector3; heading: number };
+  /** What the camera follows: the displayed board, its frame, speed and lean. */
+  cameraTarget(): CameraTarget;
   dispose(): void;
 }
 

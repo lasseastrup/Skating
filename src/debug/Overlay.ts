@@ -15,6 +15,8 @@ const COLOR_BAD = '#f87171';
 export interface OverlayActions {
   runDeterminism(): string;
   resetWorld(): void;
+  /** Debug: set speed to the top of the range, to test the camera without a hill. */
+  boost(): void;
   switchScene(name: string): void;
 }
 
@@ -98,6 +100,7 @@ export class DebugOverlay {
       this.resultEl.textContent = actions.runDeterminism();
     });
     btn('reset', () => actions.resetWorld());
+    btn('boost 14', () => actions.boost());
     for (const s of scenes) {
       const b = btn(`${s}`, () => actions.switchScene(s));
       this.sceneButtons.set(s, b);

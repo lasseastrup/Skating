@@ -5,6 +5,102 @@ overlay (4-finger tap, backquote key, or `?debug=1`).
 
 ---
 
+## Phase 1 — Rolling
+
+**Status:** complete on flat ground. Typecheck clean, determinism passes with the real controller,
+draw calls 11 (main) / 13 (playground) of 80. Feel has been checked numerically and needs a phone.
+
+### What was built
+
+| Area | File | Note |
+|---|---|---|
+| Controller | `src/sim/SkateWorld.ts` | Kinematic: position, velocity, surface frame (normal/tangent/binormal), three probes, filtered normal |
+| Surface | `src/sim/Surface.ts` | `RideSurface.project(point) → closest point + normal`. Only `PlaneSurface` so far |
+| Tuning | `src/sim/Tuning.ts` | Every feel constant, commented with units |
+| Placeholder skater | `src/render/SkaterPlaceholder.ts` | Capsule pelvis on the height spring, two stick legs to board-space foot goals, one-call board mesh |
+| Camera | `src/render/CameraRig.ts` | Position spring + look spring, FOV 60→78, roll ≤6°, lead, look-rate clamp |
+| Overlay | | New rows: state, speed, yawRate, surface, grounded, normal, tangent, charge, push, lean, pelvis, odometer. New `boost 14` button |
+
+The Phase 0 `StubWorld` is deleted. Both scenes run `SkateWorld`.
+
+### Decisions
+
+**Board is the authority; the pelvis is a second body solved onto it.** `SkateWorld` owns the
+board transform. The pelvis is its own `KinematicBody` whose transform is computed from the board
+frame, the pelvis spring height, lean and weight shift, every step. Both are hashed for
+determinism. Legs are solved render-side from the *interpolated* board and pelvis, so they never
+lag the display.
+
+**Carving preserves speed and re-aims it.** There is no lateral velocity state. Each step the
+heading rotates by `yawRate·dt` and velocity is rebuilt as `tangent × speed`. The board cannot
+drift by construction. The cost of a carve is a separate term, `speed *= 1 − carveDrag·yawRate²·dt`,
+made quadratic after the first tuning pass so gentle carves are nearly free and tic-tacs are not.
+Linear drag stalled a figure-eight in six seconds.
+
+**Turn rate: `base / (1 + speed/ref)`, scaled by an authority ramp near rest.** Measured radii at
+full stick: 1.6 m at 2 u/s, 3.9 m at 5, 5.2 m at 8, 13.2 m at 14. The authority ramp keeps 35% of
+steering at a standstill so you can tic-tac out of a stop.
+
+**Gravity is already split.** `speed += −g·tangent.y·dt`. On the flat this is exactly zero; on
+Phase 2 transitions it is what makes dropping in work with no extra code. `g = 22`, per the
+Phase 3 note that skate games run at roughly 2× real gravity.
+
+**Auto-push is a state with a contact window.** Below 5.5 u/s on flat ground, stick not held
+back, no crouch, the controller enters `Pushing` for 0.75 s and applies acceleration only between
+22% and 50% of the cycle (~3 u/s per push). Cruise settles at 5.5–7 u/s. `pushPhase` is the
+animation hook: the placeholder swings the back foot to the ground and strokes it.
+
+**Three probes, filtered normal, project-then-offset.** Nose/centre/tail probes at ±0.4 m. Normal
+is the weighted probe blend low-passed with `1 − exp(−dt/0.08)`; tangent is the nose–tail chord
+re-orthogonalised against the filtered normal. Position is the centre projection plus ride height
+along the normal, in that order.
+
+**Lean uses real gravity.** `atan(speed·yawRate / 9.81)`, clamped to 0.6 rad. The board world
+runs 2× gravity but the body should read like a person leaning.
+
+**Camera whip is clamped on look direction, not position.** After the look spring updates, the
+change in look *direction* is limited to 2.4 rad/s and the look point rebuilt at the same
+distance. The position spring is untouched so framing stays soft. Camera runs on render dt,
+clamped at 50 ms, because it is display, not simulation.
+
+**Foot goals are ±0.2 m along the deck, ±0.06 m across.** The Rig Contract says ±8.5 cm along.
+That reads as a typo for a standing stance (a real stance is 35–45 cm apart) and looks like
+knock-knees on the placeholder. Flagging it: if ±8.5 cm was intentional, change `footAlong` in
+`Tuning.ts`.
+
+### Measurements (scripted, 120 Hz sim, no renderer)
+
+| Test | Result |
+|---|---|
+| Coast from 8 u/s, stick back | 8.0 → 6.5 → 5.2 → 4.1 → 3.2 → 2.4 over 5 s |
+| Cruise from rest, stick neutral | pushes to 6.7 by 4 s, holds 5.5–7.1 |
+| Figure-eight, 70% stick alternating 3 s | holds 5.3–7.1 u/s indefinitely, 6 pushes / 12 s |
+| Crouch 0.6 s then release | pelvis 0.91 → 0.56, back to 0.91 in ~0.3 s |
+| NaN check after 12 s of figure-eight | none |
+
+Headless render gate: cpu work ≈5 ms/frame under SwiftShader (mostly GL submit), determinism OK.
+
+### Known gaps, on purpose
+
+- **Props are not rideable.** The playground quarter pipe, rail and bowl are visual only. The
+  skater rides through them. Phase 2 makes them surfaces.
+- **No collision, no air, no ollie.** Button hold crouches; release drains the charge and nothing
+  else. Phase 3.
+- **Top speed on the flat is ~7 u/s.** There is no hill, so the 8-vs-14 speed read is only
+  testable with the overlay's `boost 14` button until Phase 2 gives us transitions.
+
+### Phone checklist for this phase
+
+1. Carve a figure-eight with the stick at about 70%. It should hold speed without you doing
+   anything else, with a push every couple of seconds.
+2. Let go completely. You should coast for a long time, then push, then coast.
+3. Pull the stick back. Pushing stops and you glide to a halt.
+4. Tap `boost 14`, then carve. Turns should open up to wide arcs and the camera should widen and
+   roll a few degrees into the turn without whipping.
+5. Hold the button. The capsule sinks; release and it pops back with a small overshoot.
+
+---
+
 ## Phase 0 — Skeleton & Instrumentation
 
 **Status:** complete. Typecheck clean, production build 150 KB gzipped (budget 8 MB),
@@ -23,7 +119,7 @@ determinism test passes, draw calls 5 (main) / 7 (playground) of 80.
 | Overlay | `src/debug/Overlay.ts` | Frame graph, sim/render counters, draw calls, tris, heap, key/value panel, action buttons |
 | Determinism | `src/debug/Determinism.ts` | Same scripted input through two fresh worlds, per-step hash compare |
 | Scenes | `src/scenes/MainScene.ts`, `PlaygroundScene.ts` | Grey box on grey plane; flat + quarter pipe + rail + bowl corner |
-| Placeholder sim | `src/sim/StubWorld.ts` | Drives a box around so the loop has something to move. **Deleted in Phase 1.** |
+| Placeholder sim | `src/sim/StubWorld.ts` | Drove a box around so the loop had something to move. Deleted in Phase 1. |
 | Gates | `scripts/perf-check.mjs`, `scripts/screenshot.mjs` | Headless Chromium: throttled sampling, budgets, determinism, screenshots |
 
 ### Decisions

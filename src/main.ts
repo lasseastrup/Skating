@@ -1,6 +1,7 @@
 import { makeInputFrame, TouchInput } from './core/Input';
 import { Loop } from './core/Loop';
 import type { SimWorld } from './core/Sim';
+import { SIM_DT } from './core/Time';
 import { runDeterminismTest } from './debug/Determinism';
 import { DebugOverlay } from './debug/Overlay';
 import { CameraRig } from './render/CameraRig';
@@ -8,7 +9,7 @@ import { GameRenderer } from './render/Renderer';
 import { MainScene } from './scenes/MainScene';
 import { PlaygroundScene } from './scenes/PlaygroundScene';
 import type { GameScene } from './scenes/SceneBase';
-import { StubWorld } from './sim/StubWorld';
+import { SkateWorld } from './sim/SkateWorld';
 
 const SCENES: Record<string, () => GameScene> = {
   main: () => new MainScene(),
@@ -34,12 +35,19 @@ function boot(): void {
           ? `determinism OK  ${r.steps} steps  hash ${r.hashA}  ${r.ms.toFixed(1)}ms`
           : `determinism FAIL at step ${r.firstDivergence}  ${r.hashA} ≠ ${r.hashB}`;
       },
-      resetWorld: () => scene.world.reset(),
+      resetWorld: () => {
+        scene.world.reset();
+        scene.syncVisuals(1);
+        rig.snap(scene.cameraTarget());
+      },
+      boost: () => (scene.world as SkateWorld).debugSetSpeed(14),
       switchScene: (name) => {
         const make = SCENES[name];
         if (!make || name === scene.name) return;
         scene.dispose();
         scene = make();
+        scene.syncVisuals(1);
+        rig.snap(scene.cameraTarget());
         overlay.setScene(name);
         hook.scene = scene;
       },
@@ -62,8 +70,7 @@ function boot(): void {
     },
     render(alpha, stats) {
       scene.syncVisuals(alpha);
-      const t = scene.cameraTarget();
-      rig.update(t.pos, t.heading);
+      rig.update(scene.cameraTarget(), Math.min(stats.frameMs, 100) / 1000);
       gfx.render(scene.three, rig.camera);
 
       if (overlay.isVisible) {
@@ -93,13 +100,15 @@ function boot(): void {
     rig,
     snapshot: () => overlay.snapshot(loop.stats),
     runDeterminism: (steps?: number, seed?: number) => runDeterminismTest(makeWorld, steps, seed),
+    makeWorld,
+    simDt: SIM_DT,
   };
   (window as unknown as { __coping: unknown }).__coping = hook;
 }
 
 /** Fresh world factory for determinism testing. Always the sim under test, never the display scene. */
 function makeWorld(): SimWorld {
-  return new StubWorld();
+  return new SkateWorld();
 }
 
 boot();

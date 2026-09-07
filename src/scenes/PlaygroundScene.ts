@@ -1,5 +1,4 @@
 import {
-  BoxGeometry,
   CylinderGeometry,
   DoubleSide,
   ExtrudeGeometry,
@@ -10,9 +9,10 @@ import {
   Vector3,
 } from 'three';
 import { ParametricGeometry } from 'three/addons/geometries/ParametricGeometry.js';
-import { applyInterpolated } from '../core/Interp';
-import { StubWorld } from '../sim/StubWorld';
-import { buildGround, buildLighting, DARK_PROP, GREY_HERO, GREY_PROP, type GameScene } from './SceneBase';
+import type { CameraTarget } from '../render/CameraRig';
+import { SkaterPlaceholder } from '../render/SkaterPlaceholder';
+import { SkateWorld } from '../sim/SkateWorld';
+import { buildGround, buildLighting, DARK_PROP, GREY_PROP, type GameScene } from './SceneBase';
 
 const SUN_OFFSET = new Vector3(18, 30, 12);
 const CONCAVE = new MeshLambertMaterial({ color: 0x8a8a8a, side: DoubleSide });
@@ -34,21 +34,24 @@ export class PlaygroundScene implements GameScene {
   readonly name = 'playground';
   readonly three = new Scene();
   /** Spawn on the flat, looking across the rail toward the quarter pipe so the props are in frame. */
-  readonly world = new StubWorld({ x: 2, z: 8, heading: 0.95 });
-  private readonly boxMesh: Mesh;
+  readonly world = new SkateWorld({ x: 2, z: 8, heading: 0.95 });
+  private readonly skater: SkaterPlaceholder;
   private readonly sun;
   private readonly owned: Mesh[] = [];
+  private readonly target: CameraTarget;
 
   constructor() {
     this.sun = buildLighting(this.three, 14);
     buildGround(this.three, 120);
-    this.world.bounds = 55;
-
-    this.boxMesh = new Mesh(new BoxGeometry(1, 1, 1), GREY_HERO);
-    this.boxMesh.castShadow = true;
-    this.boxMesh.receiveShadow = true;
-    this.three.add(this.boxMesh);
-    this.owned.push(this.boxMesh);
+    this.skater = new SkaterPlaceholder(this.world);
+    this.three.add(this.skater.group);
+    this.target = {
+      pos: this.skater.board.position,
+      forward: this.world.tangent,
+      up: this.world.normal,
+      speed: 0,
+      lean: 0,
+    };
 
     this.buildQuarterPipe();
     this.buildRail();
@@ -141,16 +144,19 @@ export class PlaygroundScene implements GameScene {
   }
 
   syncVisuals(alpha: number): void {
-    applyInterpolated(this.world.box, this.boxMesh, alpha);
-    this.sun.target.position.copy(this.boxMesh.position);
-    this.sun.position.copy(this.boxMesh.position).add(SUN_OFFSET);
+    this.skater.sync(alpha);
+    this.sun.target.position.copy(this.skater.board.position);
+    this.sun.position.copy(this.skater.board.position).add(SUN_OFFSET);
   }
 
-  cameraTarget(): { pos: Vector3; heading: number } {
-    return { pos: this.boxMesh.position, heading: this.world.heading };
+  cameraTarget(): CameraTarget {
+    this.target.speed = this.world.speed;
+    this.target.lean = this.world.lean;
+    return this.target;
   }
 
   dispose(): void {
+    this.skater.dispose();
     for (const m of this.owned) m.geometry.dispose();
   }
 }
