@@ -89,6 +89,16 @@ at 0 for later balancing.
 | Draw calls / tris (island) | 25 / 25.5k |
 | Determinism (2400 steps) | OK |
 
+### Fixed after the first phone test
+
+**The torso flipped through the pelvis every pose solve.** The chest is a Verlet particle held at
+a fixed distance from the pelvis anchor. The distance constraint moved `pos` but not `prev`, so every
+correction became velocity in the next solve, the ringing grew by roughly 3× per solve, and within a
+second the chest was snapping between straight up and straight down on every solve. This was
+present since Phase 5 and independent of frame rate; the fix is that constraints move `prev` by the
+same delta (a constraint is a displacement, never a velocity), plus a guard that resets a particle that
+has blown up. `constrainRange` (hands) got the same treatment.
+
 ### Known gaps, on purpose
 
 - The autopilot used for the loop test steers crudely; a straight unsteered rider through the snake
