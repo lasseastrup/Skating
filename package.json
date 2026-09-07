@@ -1,0 +1,24 @@
+{
+  "name": "coping",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "description": "Coping - a mobile-first 3D skateboarding game in Three.js",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host",
+    "typecheck": "tsc --noEmit",
+    "check:perf": "node scripts/perf-check.mjs",
+    "screenshot": "node scripts/screenshot.mjs"
+  },
+  "dependencies": {
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "@types/three": "^0.185.4",
+    "playwright-core": "^1.63.0",
+    "typescript": "5.9",
+    "vite": "^8.2.2"
+  }
+}
