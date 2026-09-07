@@ -85,7 +85,8 @@ export class PlaygroundScene implements GameScene {
         if (inside === 0) continue;
         // u = x, v = -z
         positions.push(u0, 0, -v0, u0 + cell, 0, -v0, u0 + cell, 0, -(v0 + cell), u0, 0, -(v0 + cell));
-        index.push(vi, vi + 2, vi + 1, vi, vi + 3, vi + 2);
+        // Counter-clockwise seen from above (+Y) so the ground faces up.
+        index.push(vi, vi + 1, vi + 2, vi, vi + 2, vi + 3);
         vi += 4;
       }
     }
@@ -97,17 +98,19 @@ export class PlaygroundScene implements GameScene {
   }
 
   private buildQuarterPipe(s: QuarterPipeSpec): void {
-    const { radius: r, width, vertExt, deckDepth } = s;
+    const { radius: r, width, vertExt, deckDepth, facing: f } = s;
+    // Profile in the XY plane, mirrored through the shape itself (a negative scale would flip
+    // the triangle winding and cull the ramp inside-out).
     const sh = new Shape();
-    sh.moveTo(-deckDepth, 0);
-    sh.lineTo(r, 0);
-    sh.absarc(r, r, r, -Math.PI / 2, Math.PI, true);
+    sh.moveTo(-f * deckDepth, 0);
+    sh.lineTo(f * r, 0);
+    if (f > 0) sh.absarc(r, r, r, -Math.PI / 2, Math.PI, true);
+    else sh.absarc(-r, r, r, -Math.PI / 2, 0, false);
     sh.lineTo(0, r + vertExt);
-    sh.lineTo(-deckDepth, r + vertExt);
+    sh.lineTo(-f * deckDepth, r + vertExt);
     sh.closePath();
     const g = new ExtrudeGeometry(sh, { depth: width, bevelEnabled: false, curveSegments: 24 });
     g.translate(0, 0, -width / 2);
-    if (s.facing < 0) g.scale(-1, 1, 1);
     const m = this.add(new Mesh(g, GREY_PROP));
     m.position.set(s.wallX, 0, s.zCenter);
   }

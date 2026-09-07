@@ -404,7 +404,9 @@ export class SkateWorld implements SimWorld {
       if (r.margin < -T.boundsSlack) continue;
       if (r.h > T.landMaxHeight || r.h < -T.landMaxPenetration) continue;
       if (r.normal.y < T.landMinNormalY) continue;
-      if (this.vel.dot(r.normal) >= 0) continue;
+      // Land if we are moving into the surface, or have already crossed it (a grazing approach
+      // can have velocity pointing away from a concave surface while still passing through it).
+      if (r.h >= 0 && this.vel.dot(r.normal) >= 0) continue;
       if (!best || r.h > best.h) best = r;
     }
     if (best) this.land(best);

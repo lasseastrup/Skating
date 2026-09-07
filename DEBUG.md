@@ -77,7 +77,10 @@ Curvature is capped at 0.45/m for pumping so a tight channel is not a free energ
 
 **Landing (Phase 2 version).** Accept a surface when the board centre is within [−0.6, +0.09] m of
 it, inside its bounds by the same 1 cm slack as grounded riding (a looser landing tolerance
-re-caught the lip edge and froze the skater there), moving into it, and not steeper than n.y ≥ 0.15.
+re-caught the lip edge and froze the skater there), not steeper than n.y ≥ 0.15, and either moving
+into it or already below it. The "already below it" clause matters: a skater that pushes off a
+deck approaches the transition at a grazing angle with velocity pointing *away* from the concave
+surface while still passing through it. Without it the drop-in fell through the world.
 Tangential velocity survives, the normal part is absorbed into the pelvis spring. Frame snaps;
 Phase 3 blends it 120 ms early.
 
