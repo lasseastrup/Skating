@@ -164,8 +164,9 @@ export const TUNING = {
   grindMaxTangentY: 0.77,
   /** Blend into the constraint over this long so the snap is not visible. */
   grindBlendTime: 0.08,
-  /** Hold the stick sideways this long to drop off the side, with this much lateral push. */
-  grindDropHold: 0.15,
+  /** Hold the stick sideways this long to drop off the side, with this much lateral push. Long
+   *  enough that holding a boardslide (stick sideways yaws the board) does not throw you off. */
+  grindDropHold: 0.6,
   grindDropPush: 1.0,
   /** Cosmetic wobble (rad) and its frequency; the button (lock) kills it. */
   grindWobble: 0.06,
@@ -177,4 +178,25 @@ export const TUNING = {
   grindStallTime: 0.6,
   grindStallPush: 1.2,
   grindReattachDelayAfterStall: 0.6,
+
+  // --- Phase 6: tricks, poses, bails -------------------------------------------------------------
+  /** First part of the air that counts as the Pop animation state. */
+  popAnimTime: 0.08,
+  /** Impact animation state after touchdown. */
+  impactTime: 0.15,
+  /** A sloppy pop (low back-foot steeze) seats the back foot up to this much later. */
+  catchSloppyDelay: 0.12,
+  /** Manual: stick threshold, minimum speed, chase rate, board pitch, extra drag. */
+  manualStick: 0.85,
+  manualMinSpeed: 3,
+  manualRate: 10,
+  manualPitch: (18 * Math.PI) / 180,
+  manualDrag: 0.12,
+  /** Grind pose: stick X × yaw, stick Y × pitch, chase rate. */
+  grindYawMax: Math.PI / 2,
+  grindPitchMax: (25 * Math.PI) / 180,
+  grindPoseRate: 8,
+  /** Bail weight ramp: into ragdoll, back to posed. */
+  bailRampIn: 0.15,
+  bailRampOut: 0.35,
 } as const;

@@ -3,6 +3,7 @@ import type { InputFrame } from '../core/Input';
 import { KinematicBody, type SimWorld } from '../core/Sim';
 import type { ProjectResult } from './Surface';
 import type { GrindPath } from './Grind';
+import { classifyGrind, classifyTrick, CONTACTS, OLLIE, pivotForPitch, ROSE, type Contact, type TrickTargets } from './Tricks';
 import type { Compound } from './surfaces/Compound';
 import { TUNING as T } from './Tuning';
 
@@ -16,31 +17,30 @@ export enum SkateState {
   Bailed = 'Bailed',
 }
 
-/** A trick is a set of rotation targets picked from the 8-way rose at takeoff. Phase 6 replaces
- *  names with continuous flip/scoop channels; for now four base tricks and their mirrors. */
-interface Trick {
-  name: string;
-  /** Body spin about world up, radians. Negative = frontside for a regular skater. */
-  spin: number;
-  /** Board rotation about its long axis, radians. */
-  flip: number;
-  /** Board rotation about its normal relative to the body, radians. */
-  shuv: number;
+/**
+ * The animation state machine, Skater XL's list. Derived from the physics state every step:
+ * the pop is three states, the landing two, coping enter/exit are first class.
+ */
+export enum AnimState {
+  Riding = 'Riding',
+  Pushing = 'Pushing',
+  Braking = 'Braking',
+  Setup = 'Setup',
+  BeginPop = 'BeginPop',
+  Pop = 'Pop',
+  InAir = 'InAir',
+  Release = 'Release',
+  Impact = 'Impact',
+  Powerslide = 'Powerslide',
+  Manual = 'Manual',
+  Grinding = 'Grinding',
+  EnterCoping = 'EnterCoping',
+  ExitCoping = 'ExitCoping',
+  Grabs = 'Grabs',
+  Bailed = 'Bailed',
 }
 
-const OLLIE: Trick = { name: 'ollie', spin: 0, flip: 0, shuv: 0 };
 const D = Math.PI / 180;
-/** Rose indexed by direction: E, NE, N, NW, W, SW, S, SE (stick angle / 45°). */
-const ROSE: Trick[] = [
-  { name: 'fs 180', spin: -180 * D, flip: 0, shuv: 0 },
-  { name: 'fs kickflip', spin: -180 * D, flip: 360 * D, shuv: 0 },
-  { name: 'kickflip', spin: 0, flip: 360 * D, shuv: 0 },
-  { name: 'bs kickflip', spin: 180 * D, flip: 360 * D, shuv: 0 },
-  { name: 'bs 180', spin: 180 * D, flip: 0, shuv: 0 },
-  { name: 'bs 360 shuv', spin: 180 * D, flip: 0, shuv: 360 * D },
-  { name: '360 shuv', spin: 0, flip: 0, shuv: 360 * D },
-  { name: 'fs 360 shuv', spin: -180 * D, flip: 0, shuv: 360 * D },
-];
 
 const MAX_CAND = 24;
 
@@ -55,7 +55,7 @@ function residual(a: number, period: number): number {
  * ride height, or ballistic when nothing claims it.
  *
  * The board is the authority: `board` is the transform the surface controller computes, the
- * frame plus board-relative pitch/flip/shuv. The skater (`pelvis`) is solved onto the frame.
+ * frame plus board-relative pitch/flip/scoop. The skater (`pelvis`) is solved onto the frame.
  *
  * Energy rules:
  *  - gravity is split: the tangential part accelerates, the normal part is absorbed
@@ -68,7 +68,7 @@ function residual(a: number, period: number): number {
 export class SkateWorld implements SimWorld {
   readonly board = new KinematicBody();
   readonly pelvis = new KinematicBody();
-  /** The body frame: board position, frame rotation only (no lean, flip, shuv or pitch). The rig
+  /** The body frame: board position, frame rotation only (no lean, flip, scoop or pitch). The rig
    *  hangs its stepped pose off this, so the body rides the board smoothly. */
   readonly frame = new KinematicBody();
   readonly bodies: readonly KinematicBody[] = [this.board, this.pelvis, this.frame];
@@ -115,18 +115,22 @@ export class SkateWorld implements SimWorld {
   /** Time left in which a release still pops after leaving a lip without popping. */
   coyote = 0;
   private readonly lastGroundNormal = new Vector3(0, 1, 0);
-  trick: Trick = OLLIE;
+  trick: TrickTargets = OLLIE;
+  /** Derived label: provisional at takeoff, final at landing from what actually rotated. */
+  trickName = 'ollie';
   /** Body spin about world up, rad/s, and how much of the trick's spin is still owed. */
   spinRate = 0;
   private spinRemaining = 0;
   private spinDir = 0;
   private trickRate = 0;
-  /** Board-relative angles (rad): pitch about right, flip about long axis, shuv about normal. */
+  /** Predicted air time at takeoff; the pose library's timeline runs over it. */
+  airPredicted = 0.5;
+  /** Board-relative angles (rad): pitch about right, flip about long axis, scoop about normal. */
   pitch = 0;
   flip = 0;
-  shuv = 0;
+  scoop = 0;
   private flipTarget = 0;
-  private shuvTarget = 0;
+  private scoopTarget = 0;
   grabbing = false;
   /** Landing prediction. */
   landingPredicted = false;
@@ -136,8 +140,30 @@ export class SkateWorld implements SimWorld {
   lastMisalignDeg = 0;
   private bailTimer = 0;
 
+  // --- Phase 6: animation state, steeze, catch, manual, bail ramp ------------------------------
+  animState = AnimState.Riding;
+  /** Style channel per foot, 0..1, from how cleanly the pop was input. Decays after landing. */
+  steezeL = 0;
+  steezeR = 0;
+  /** Per-foot catch: false while a foot is off the flipping board. */
+  caughtL = true;
+  caughtR = true;
+  private catchDelayR = 0;
+  /** Accumulated body spin since takeoff, for the classifier. */
+  spinTotal = 0;
+  /** Manual: -1 nose manual … +1 tail manual (board pitch nose-up). */
+  manual = 0;
+  private impactTimer = 0;
+  /** Bail ramp 0..1: 0 fully posed, 1 fully ragdoll. Smoothstepped both ways. */
+  bailRamp = 0;
+
   // --- grind state -----------------------------------------------------------------------------
   grindPath: GrindPath | null = null;
+  /** Board yaw on the edge (stick X × 90°) and pitch (stick Y × 25°), and the carrying contact. */
+  grindYaw = 0;
+  grindPitch = 0;
+  grindContact: Contact = 'center';
+  grindName = '50-50';
   private grindT = 0;
   /** +1 when the board's nose points along the path's parameter direction, -1 when against. */
   private grindDir = 1;
@@ -220,14 +246,29 @@ export class SkateWorld implements SimWorld {
     this.trickRate = 0;
     this.pitch = 0;
     this.flip = 0;
-    this.shuv = 0;
+    this.scoop = 0;
     this.flipTarget = 0;
-    this.shuvTarget = 0;
+    this.scoopTarget = 0;
     this.grabbing = false;
     this.landingPredicted = false;
     this.predSurface = -1;
     this.lastMisalignDeg = 0;
     this.bailTimer = 0;
+    this.animState = AnimState.Riding;
+    this.trickName = 'ollie';
+    this.steezeL = 0;
+    this.steezeR = 0;
+    this.caughtL = true;
+    this.caughtR = true;
+    this.catchDelayR = 0;
+    this.spinTotal = 0;
+    this.manual = 0;
+    this.impactTimer = 0;
+    this.bailRamp = 0;
+    this.grindYaw = 0;
+    this.grindPitch = 0;
+    this.grindContact = 'center';
+    this.grindName = '50-50';
     this.grindPath = null;
     this.grindT = 0;
     this.grindDir = 1;
@@ -328,6 +369,7 @@ export class SkateWorld implements SimWorld {
       case SkateState.Pushing:
         this.stepSteering(input, dt);
         this.stepEnergy(input, dt);
+        this.stepManual(input, dt);
         this.stepPush(input, dt);
         this.pos.addScaledVector(this.tangent, this.speed * dt);
         this.distance += Math.abs(this.speed) * dt;
@@ -346,8 +388,61 @@ export class SkateWorld implements SimWorld {
         this.stepBail(dt);
         break;
     }
+    if (this.impactTimer > 0) this.impactTimer -= dt;
+    if (this.grounded || this.state === SkateState.Grinding) {
+      this.steezeL = Math.max(0, this.steezeL - dt / 1.2);
+      this.steezeR = Math.max(0, this.steezeR - dt / 1.2);
+    }
+    // Bail ramp: smoothstepped toward 1 while down, back toward 0 on recovery.
+    const rampTarget = this.state === SkateState.Bailed ? 1 : 0;
+    const rampRate = rampTarget > this.bailRamp ? 1 / T.bailRampIn : 1 / T.bailRampOut;
+    this.bailRamp = approach(this.bailRamp, rampTarget, rampRate * dt);
+
     this.stepBody(input, dt);
+    this.deriveAnimState(input);
     this.writeBodies();
+  }
+
+  /** Skater XL's state list, derived from the physics state and its timers. */
+  private deriveAnimState(input: InputFrame): void {
+    let a: AnimState;
+    switch (this.state) {
+      case SkateState.Pushing:
+        a = AnimState.Pushing;
+        break;
+      case SkateState.Riding:
+        if (Math.abs(this.manual) > 0.3) a = AnimState.Manual;
+        else if (this.impactTimer > 0) a = AnimState.Impact;
+        else if (input.button && this.holdTime >= T.tapHold) a = AnimState.Setup;
+        else a = AnimState.Riding;
+        break;
+      case SkateState.Pop:
+        a = AnimState.BeginPop;
+        break;
+      case SkateState.Air:
+        if (this.airTime < T.popAnimTime) a = AnimState.Pop;
+        else if (this.grabbing) a = AnimState.Grabs;
+        else if (this.landingPredicted) a = AnimState.Release;
+        else if (this.simTime - this.lastGrindExit < 0.2) a = AnimState.ExitCoping;
+        else a = AnimState.InAir;
+        break;
+      case SkateState.Grinding:
+        a = this.grindBlend < 1 ? AnimState.EnterCoping : AnimState.Grinding;
+        break;
+      default:
+        a = AnimState.Bailed;
+    }
+    this.animState = a;
+  }
+
+  // --- manual: weight hard forward or back at speed lifts a truck. Never fails. ----------------
+  private stepManual(input: InputFrame, dt: number): void {
+    const wants = Math.abs(input.stickY) > T.manualStick && Math.abs(this.speed) > T.manualMinSpeed && this.charge < 0.05 && this.state === SkateState.Riding;
+    const target = wants ? -Math.sign(input.stickY) : 0; // stick back = tail manual = nose up
+    this.manual += (target - this.manual) * Math.min(1, T.manualRate * dt);
+    if (Math.abs(this.manual) < 0.01) this.manual = 0;
+    this.pitch = this.manual * T.manualPitch;
+    if (Math.abs(this.manual) > 0.5) this.speed -= this.speed * T.manualDrag * dt;
   }
 
   // --- steering: heading follows the stick, velocity follows heading ---------------------------
@@ -412,6 +507,7 @@ export class SkateWorld implements SimWorld {
       this.speed > -0.3 &&
       this.pushCooldown <= 0 &&
       this.charge < 0.05 &&
+      Math.abs(this.manual) < 0.3 &&
       input.stickY > T.pushSuppressStickY &&
       this.normal.y > 0.97 &&
       this.curvature < T.pushMaxCurvature;
@@ -526,6 +622,8 @@ export class SkateWorld implements SimWorld {
       this.lastGrindExit = this.simTime;
       this.reattachDelay = T.grindReattachDelay;
       this.grindPath = null;
+      this.grindYaw = 0;
+      this.grindPitch = 0;
     }
     this.state = SkateState.Pop;
     this.popTimer = 0;
@@ -572,28 +670,44 @@ export class SkateWorld implements SimWorld {
   /** Stick direction at the moment of takeoff picks from the 8-way rose. */
   private selectTrick(input: InputFrame): void {
     const mag = Math.hypot(input.stickX, input.stickY);
+    // Steeze: how cleanly the input was executed. Front foot from wedge accuracy, back foot from
+    // charge. Clean input → more steeze → tweaked poses. Skill made visible for free.
+    this.steezeR = Math.min(1, Math.max(0, (this.charge - 0.3) / 0.6));
     if (mag < T.trickDeadzone) {
       this.trick = OLLIE;
-      return;
+      this.steezeL = 0.5;
+    } else {
+      let a = Math.atan2(input.stickY, input.stickX);
+      if (a < 0) a += 2 * Math.PI;
+      const wedge = Math.PI / 4;
+      const idx = Math.round(a / wedge) % 8;
+      let err = Math.abs(a - idx * wedge);
+      if (err > Math.PI) err = 2 * Math.PI - err;
+      this.steezeL = Math.max(0, 1 - err / (wedge / 2));
+      this.trick = ROSE[idx];
     }
-    let a = Math.atan2(input.stickY, input.stickX);
-    if (a < 0) a += 2 * Math.PI;
-    const idx = Math.round(a / (Math.PI / 4)) % 8;
-    this.trick = ROSE[idx];
+    this.trickName = classifyTrick(this.trick.spin, this.trick.flip, this.trick.scoop);
   }
 
   /** Set rotation rates so the trick completes inside the predicted air time. */
   private armTrick(): void {
     const tAir = Math.max(T.minTrickTime, (2 * Math.max(0, this.vel.y)) / T.gravity);
+    this.airPredicted = tAir;
     const tTrick = Math.max(T.minTrickTime, tAir * T.trickTimeFraction);
     const t = this.trick;
-    this.trickRate = (Math.max(Math.abs(t.spin), Math.abs(t.flip), Math.abs(t.shuv), Math.PI) / tTrick);
+    this.trickRate = (Math.max(Math.abs(t.spin), Math.abs(t.flip), Math.abs(t.scoop), Math.PI) / tTrick);
     this.spinRemaining = Math.abs(t.spin);
     this.spinDir = Math.sign(t.spin);
     this.flip = 0;
-    this.shuv = 0;
     this.flipTarget = t.flip;
-    this.shuvTarget = t.shuv;
+    // Popping out of a grind starts from the grind yaw: straighten to the nearest 180, then scoop.
+    this.scoopTarget = this.scoop - residual(this.scoop, Math.PI) + t.scoop;
+    this.spinTotal = 0;
+    // Feet leave the board only when it rotates under them.
+    const boardMoves = t.flip !== 0 || t.scoop !== 0;
+    this.caughtL = !boardMoves;
+    this.caughtR = !boardMoves;
+    this.catchDelayR = (1 - this.steezeR) * T.catchSloppyDelay;
   }
 
   // --- air: ballistic, spin, predict the landing, land ----------------------------------------
@@ -618,6 +732,7 @@ export class SkateWorld implements SimWorld {
       rate = -Math.sign(input.stickX) * T.heldSpinRate * (this.grabbing ? T.grabSpinDamping : 1);
     }
     this.spinRate = rate;
+    this.spinTotal += rate * dt;
     if (rate !== 0) {
       // Spin about the body axis (the frame normal). On the flat that is world up; off a vert
       // wall it is the wall normal, which is what turns "up the wall" into "down the wall".
@@ -628,8 +743,16 @@ export class SkateWorld implements SimWorld {
 
     // Board-relative trick channels advance toward their targets and stop (the catch).
     this.flip = approach(this.flip, this.flipTarget, this.trickRate * dt);
-    this.shuv = approach(this.shuv, this.shuvTarget, this.trickRate * dt);
+    this.scoop = approach(this.scoop, this.scoopTarget, this.trickRate * dt);
     this.pitch *= Math.exp(-dt / T.pitchDecayTau);
+    // Catch, per foot: the front foot seats as soon as the board is done rotating; a sloppy
+    // trick (low back-foot steeze) seats the back foot a beat later.
+    const boardDone = Math.abs(this.flip - this.flipTarget) < 0.05 && Math.abs(this.scoop - this.scoopTarget) < 0.05;
+    if (boardDone && !this.caughtL) this.caughtL = true;
+    if (this.caughtL && !this.caughtR) {
+      this.catchDelayR -= dt;
+      if (this.catchDelayR <= 0) this.caughtR = true;
+    }
 
     // Landing prediction. Two horizons: the heading assist starts early so a spin can finish to
     // the nearest 0/180 at a sane rate; the frame normal blends onto the surface in the last
@@ -655,9 +778,9 @@ export class SkateWorld implements SimWorld {
       const step = (Math.PI / T.landLookahead) * dt;
       this.rotateNormalToward(this.predNormal, step);
       this.flip = approach(this.flip, this.flip - residual(this.flip, 2 * Math.PI), step);
-      this.shuv = approach(this.shuv, this.shuv - residual(this.shuv, Math.PI), step);
+      this.scoop = approach(this.scoop, this.scoop - residual(this.scoop, Math.PI), step);
       this.flipTarget = this.flip;
-      this.shuvTarget = this.shuv;
+      this.scoopTarget = this.scoop;
       this.pitch *= Math.exp(-dt / (T.pitchDecayTau * 0.5));
     }
 
@@ -748,21 +871,26 @@ export class SkateWorld implements SimWorld {
       mis = Math.acos(Math.min(1, Math.abs(d)));
     }
     const flipRes = Math.abs(residual(this.flip, 2 * Math.PI));
-    const shuvRes = Math.abs(residual(this.shuv, Math.PI));
+    const scoopRes = Math.abs(residual(this.scoop, Math.PI));
     this.lastMisalignDeg = mis / D;
 
-    if (mis > T.landBailAngle || flipRes > T.landBailAngle || shuvRes > T.landBailAngle) {
+    if (mis > T.landBailAngle || flipRes > T.landBailAngle || scoopRes > T.landBailAngle) {
       this.bail(r, vt > 0.3 ? this.tmp : this.tmp2, n);
       return;
     }
 
     this.current = r.surface;
     this.landings++;
+    this.impactTimer = T.impactTime;
+    this.caughtL = true;
+    this.caughtR = true;
+    // The name is what actually rotated, not what the rose promised.
+    this.trickName = classifyTrick(this.spinTotal, this.flip, this.scoop);
     // Catch: board seats on the nearest clean orientation.
     this.flip -= residual(this.flip, 2 * Math.PI);
-    this.shuv -= residual(this.shuv, Math.PI);
+    this.scoop -= residual(this.scoop, Math.PI);
     this.flipTarget = this.flip;
-    this.shuvTarget = this.shuv;
+    this.scoopTarget = this.scoop;
     this.pitch = 0;
 
     let speed: number;
@@ -848,6 +976,21 @@ export class SkateWorld implements SimWorld {
     g.path.frame(t, this.gP, this.gT, this.gK);
     g.upAt(this.gP, this.gUp);
     this.grindDir = this.tangent.dot(this.gT) >= 0 ? 1 : -1;
+    // The board keeps the angle it arrived at while the body frame aligns to the edge, so there is
+    // no visible snap; the yaw then relaxes to what the stick asks for.
+    this.tmp.copy(this.gT).multiplyScalar(this.grindDir);
+    this.tmp.y = 0;
+    this.tmp2.set(this.tangent.x, 0, this.tangent.z);
+    if (this.tmp.lengthSq() > 1e-6 && this.tmp2.lengthSq() > 1e-6) {
+      this.tmp.normalize();
+      this.tmp2.normalize();
+      const c = Math.min(1, Math.max(-1, this.tmp.dot(this.tmp2)));
+      const sgn = this.tmp.x * this.tmp2.z - this.tmp.z * this.tmp2.x >= 0 ? 1 : -1;
+      this.grindYaw = sgn * Math.acos(c);
+    } else this.grindYaw = 0;
+    this.grindPitch = 0;
+    this.scoop = this.grindYaw;
+    this.scoopTarget = this.grindYaw;
     // Velocity along the edge survives; the rest is absorbed into the pelvis spring.
     this.speed = this.vel.dot(this.gT) * this.grindDir;
     const vUp = this.vel.dot(this.gUp);
@@ -860,9 +1003,9 @@ export class SkateWorld implements SimWorld {
     this.grindStallTimer = 0;
     // Catch the board.
     this.flip -= residual(this.flip, 2 * Math.PI);
-    this.shuv -= residual(this.shuv, Math.PI);
+    this.scoop -= residual(this.scoop, Math.PI);
     this.flipTarget = this.flip;
-    this.shuvTarget = this.shuv;
+    this.scoopTarget = this.scoop;
     this.pitch = 0;
     this.spinRate = 0;
     this.spinRemaining = 0;
@@ -905,7 +1048,25 @@ export class SkateWorld implements SimWorld {
     this.tmp.copy(this.gT).multiplyScalar(this.grindDir);
     this.rotateTangentToward(this.tmp, step);
     this.grindBlend = Math.min(1, this.grindBlend + dt / T.grindBlendTime);
-    this.pos.copy(this.gP).addScaledVector(this.gUp, g.height).addScaledVector(this.grindOffset, 1 - this.grindBlend);
+
+    // Grind pose is computed, never authored: stick X yaws the board on the edge, stick Y pitches
+    // it, and the nearest of the six contact points becomes the pivot that sits on the edge.
+    this.grindYaw += (input.stickX * T.grindYawMax - this.grindYaw) * Math.min(1, T.grindPoseRate * dt);
+    this.grindPitch += (-input.stickY * T.grindPitchMax - this.grindPitch) * Math.min(1, T.grindPoseRate * dt);
+    this.scoop = this.grindYaw;
+    this.scoopTarget = this.grindYaw;
+    this.pitch = this.grindPitch;
+    this.grindContact = pivotForPitch(this.grindPitch);
+    this.grindName = classifyGrind(this.grindYaw, this.grindPitch, this.grindContact);
+    // Board centre = pivot on the edge minus the pivot's offset along the (yawed, pitched) deck.
+    this.tmp.copy(this.tangent).negate();
+    this.mat.makeBasis(this.binormal, this.normal, this.tmp);
+    this.q.setFromRotationMatrix(this.mat);
+    this.q2.set(0, Math.sin(this.scoop / 2), 0, Math.cos(this.scoop / 2));
+    this.q3.set(Math.sin(this.pitch / 2), 0, 0, Math.cos(this.pitch / 2));
+    this.q2.multiply(this.q3);
+    this.tmp.set(0, 0, -CONTACTS[this.grindContact]).applyQuaternion(this.q2).applyQuaternion(this.q);
+    this.pos.copy(this.gP).addScaledVector(this.gUp, g.height).sub(this.tmp).addScaledVector(this.grindOffset, 1 - this.grindBlend);
     this.vel.copy(this.tangent).multiplyScalar(this.speed);
 
     // Drop off the side: hold the stick sideways.
@@ -952,6 +1113,11 @@ export class SkateWorld implements SimWorld {
     this.reattachDelay = reattachDelay;
     this.grindPath = null;
     this.grindBlend = 1;
+    // The board turns back from its grind yaw to the nearest straight orientation in the air.
+    this.scoopTarget = this.scoop - residual(this.scoop, Math.PI);
+    this.trickRate = Math.max(this.trickRate, Math.PI / 0.35);
+    this.grindYaw = 0;
+    this.grindPitch = 0;
     this.toAir(true);
   }
 
@@ -983,12 +1149,15 @@ export class SkateWorld implements SimWorld {
     this.speed = this.vel.length() * 0.3;
     this.vel.copy(this.tangent).multiplyScalar(this.speed);
     this.flip = 0;
-    this.shuv = 0;
+    this.scoop = 0;
     this.flipTarget = 0;
-    this.shuvTarget = 0;
+    this.scoopTarget = 0;
     this.pitch = 0;
     this.grabbing = false;
     this.spinRate = 0;
+    this.caughtL = true;
+    this.caughtR = true;
+    this.trickName = classifyTrick(this.spinTotal, this.flip, this.scoop) + ' (bail)';
     this.landingPredicted = false;
     this.headingAssisting = false;
     this.pelvisV = -3;
@@ -1020,7 +1189,7 @@ export class SkateWorld implements SimWorld {
       // Cosmetic wobble; the button is the lock. Grinding never fails either way.
       leanTarget = input.button ? 0 : T.grindWobble * Math.sin(2 * Math.PI * T.grindWobbleHz * this.simTime);
     }
-    if (this.state === SkateState.Bailed) leanTarget = 1.2;
+    if (this.state === SkateState.Bailed) leanTarget = 0.35;
     this.lean += (leanTarget - this.lean) * Math.min(1, T.leanRate * dt);
 
     this.weight += (input.stickY - this.weight) * Math.min(1, 12 * dt);
@@ -1054,8 +1223,8 @@ export class SkateWorld implements SimWorld {
     this.q.setFromRotationMatrix(this.mat); // frame
     this.frame.curr.pos.copy(this.pos);
     this.frame.curr.rot.copy(this.q);
-    // Board-relative: shuv about local Y, pitch about local X, flip about local Z (long axis).
-    this.q2.set(0, Math.sin(this.shuv / 2), 0, Math.cos(this.shuv / 2));
+    // Board-relative: scoop about local Y, pitch about local X, flip about local Z (long axis).
+    this.q2.set(0, Math.sin(this.scoop / 2), 0, Math.cos(this.scoop / 2));
     this.q3.set(Math.sin(this.pitch / 2), 0, 0, Math.cos(this.pitch / 2));
     this.q2.multiply(this.q3);
     this.q3.set(0, 0, Math.sin(this.flip / 2), Math.cos(this.flip / 2));
@@ -1076,14 +1245,16 @@ export class SkateWorld implements SimWorld {
   }
 
   debugReport(kv: (key: string, value: string | number) => void): void {
-    kv('state', this.state + (this.grabbing ? ' grab' : ''));
+    kv('state', `${this.state}  anim ${this.animState}`);
+    kv('trickName', `${this.trickName}  steeze ${this.steezeL.toFixed(2)}/${this.steezeR.toFixed(2)}  caught ${this.caughtL ? 'L' : '-'}${this.caughtR ? 'R' : '-'}`);
     kv('surface', this.surfaceId);
     kv('speed', `${this.speed.toFixed(2)} u/s`);
-    kv('trick', `${this.trick.name}  spin ${(this.spinRate / D).toFixed(0)}°/s`);
-    kv('board', `flip ${(this.flip / D).toFixed(0)}°  shuv ${(this.shuv / D).toFixed(0)}°  pitch ${(this.pitch / D).toFixed(0)}°`);
+    kv('trick', `spin ${(this.spinRate / D).toFixed(0)}°/s  total ${(this.spinTotal / D).toFixed(0)}°`);
+    kv('board', `flip ${(this.flip / D).toFixed(0)}°  scoop ${(this.scoop / D).toFixed(0)}°  pitch ${(this.pitch / D).toFixed(0)}°`);
     kv('air', `${this.airTime.toFixed(2)} s  coyote ${this.coyote > 0 ? this.coyote.toFixed(2) : '—'}  land→ ${this.landingPredicted ? this.compound.surfaces[this.predSurface].id : '—'}`);
     kv('landings', `${this.landings}  bails ${this.bails}  last mis ${this.lastMisalignDeg.toFixed(0)}°`);
-    kv('grind', this.grindPath ? `${this.grindPath.id} (${this.grindPath.material})  t ${this.grindT.toFixed(2)}${this.prevButton ? '  lock' : ''}` : `—  (${this.grinds}, ${this.grindDistance.toFixed(0)} m)`);
+    kv('grind', this.grindPath ? `${this.grindName}  ${this.grindPath.id}  yaw ${(this.grindYaw / D).toFixed(0)}° pitch ${(this.grindPitch / D).toFixed(0)}°${this.prevButton ? '  lock' : ''}` : `—  (${this.grinds}, ${this.grindDistance.toFixed(0)} m)`);
+    kv('manual', `${this.manual.toFixed(2)}  bailRamp ${this.bailRamp.toFixed(2)}`);
     kv('curv', `${this.curvature.toFixed(3)} /m  N ${this.normalForce.toFixed(1)}`);
     kv('pump', this.inTransition ? `${this.pumpFactor.toFixed(1)} (${this.transitions})` : `— (${this.transitions})`);
     kv('yawRate', `${this.yawRate.toFixed(2)} rad/s`);

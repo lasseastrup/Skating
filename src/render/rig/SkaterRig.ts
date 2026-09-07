@@ -8,12 +8,13 @@ import {
   Vector3,
 } from 'three';
 import { applyInterpolated } from '../../core/Interp';
-import { SkateState, type SkateWorld } from '../../sim/SkateWorld';
+import { AnimState, SkateState, type SkateWorld } from '../../sim/SkateWorld';
 import { TUNING as T } from '../../sim/Tuning';
 import { quatFromDirFront, solveTwoBone } from './IK';
 import { RIG } from './RigSpec';
 import { SkaterSkeleton } from './Skeleton';
 import { Particle } from './Verlet';
+import { grindStyle, makePose, manualPose, sampleTrickPose, scalePose, smoothstep, zeroPose } from './Poses';
 
 const BODY_MAT = new MeshLambertMaterial({ color: 0xc8c8c8 });
 const DECK_MAT = new MeshLambertMaterial({ color: 0x3a3a3a });
@@ -57,6 +58,11 @@ export class SkaterRig {
   private readonly pelvisLocalQ = new Quaternion();
   private readonly lookDir = new Vector3(1, 0, 0);
   private overreach = [false, false];
+  /** Per-foot IK position weight: 0 = foot off the board (hangs from the body), 1 = on the goal. */
+  private footPosWeight = [1, 1];
+  /** Six body-group weights, 1 = posed, 0 = ragdoll (Verlet + spring only). */
+  readonly groupWeight = { legs: 1, pelvis: 1, torso: 1, armL: 1, armR: 1, head: 1 };
+  private readonly pose = makePose();
 
   // Verlet particles (body frame).
   private readonly chest = new Particle();
@@ -186,24 +192,92 @@ export class SkaterRig {
     this.pelvisLocalQ.setFromAxisAngle(Z, lean);
     this.pelvisUp.copy(Y).applyQuaternion(this.pelvisLocalQ);
 
+    // --- Pose library sample for this moment (offsets on top of the procedural base) ------------
+    const pose = zeroPose(this.pose);
+    const anim = w.animState;
+    if (anim === AnimState.Setup || anim === AnimState.BeginPop) {
+      sampleTrickPose(w.trick, 0, w.steezeL, w.steezeR, pose);
+      if (anim === AnimState.Setup) scalePose(pose, 0.6 * w.charge);
+    } else if (inAir) {
+      const t01 = Math.min(1, w.airTime / Math.max(0.3, w.airPredicted));
+      sampleTrickPose(w.trick, t01, w.steezeL, w.steezeR, pose);
+      if (w.grabbing) scalePose(pose, 0.4);
+    } else if (anim === AnimState.Impact) {
+      sampleTrickPose(w.trick, 1, w.steezeL, w.steezeR, pose);
+      scalePose(pose, Math.max(0, 1 - w.simTime * 0) * 0.8);
+    } else if (grinding) {
+      grindStyle(w.grindName, pose);
+      if (w.animState === AnimState.EnterCoping) scalePose(pose, 0.5);
+    } else if (anim === AnimState.Manual) {
+      manualPose(w.manual, pose);
+    }
+
+    // --- Bail: six body-group weights ramp toward ragdoll, staggered so it cascades ----------
+    const ramp = w.bailRamp;
+    const gw = this.groupWeight;
+    gw.legs = 1 - smoothstep(ramp / 0.7);
+    gw.pelvis = 1 - smoothstep((ramp - 0.05) / 0.7);
+    gw.torso = 1 - smoothstep((ramp - 0.1) / 0.7);
+    gw.armL = 1 - smoothstep((ramp - 0.15) / 0.7);
+    gw.armR = 1 - smoothstep((ramp - 0.2) / 0.7);
+    gw.head = 1 - smoothstep((ramp - 0.3) / 0.7);
+
+    // Pelvis pose offset (board space) and bail pitch: the body pitches forward and falls back
+    // behind the board as its weight drops out.
+    this.pelvisLocal.x += pose.pelvis[0];
+    this.pelvisLocal.y += pose.pelvis[1];
+    this.pelvisLocal.z += pose.pelvis[2] + 0.35 * (1 - gw.pelvis);
+    if (gw.pelvis < 1) {
+      this.q2.setFromAxisAngle(Z, -0.9 * (1 - gw.pelvis));
+      this.pelvisLocalQ.multiply(this.q2);
+      this.pelvisUp.copy(Y).applyQuaternion(this.pelvisLocalQ);
+    }
+
     // Foot goals in board space (the whole design). Front = left = -Z.
     const fl = this.footGoal[0].set(-T.footAcross, RIG.ankleHeight, -T.footAlong);
     const fr = this.footGoal[1].set(T.footAcross, RIG.ankleHeight, T.footAlong);
     if (inAir) {
       // Legs tuck a little in the air; more in a grab. Mid-trick the deck flips away under them.
-      const tuck = 0.08 + (w.grabbing ? 0.12 : 0);
+      const tuck = 0.06 + (w.grabbing ? 0.12 : 0);
       fl.y += tuck;
       fr.y += tuck;
     }
     const pushing = w.pushPhase > 0;
     if (pushing) this.pushStroke(fr, w.pushPhase);
-    if (bailed) {
-      fl.y += 0.1;
-      fr.set(0.45, 0.05, 0.3);
+    // Per-foot position weight: 0 while the foot is off the flipping board, back to 1 on catch.
+    // Rotation weight stays 1 throughout (the toe direction below never blends), so the feet
+    // leave the board but stay oriented with it. Catch is per foot.
+    const caught = [w.caughtL, w.caughtR];
+    for (let i = 0; i < 2; i++) {
+      const target = caught[i] ? 1 : 0;
+      const rate = target > this.footPosWeight[i] ? dt / 0.06 : dt / 0.03;
+      this.footPosWeight[i] += Math.max(-rate, Math.min(rate, target - this.footPosWeight[i]));
+    }
+    for (let i = 0; i < 2; i++) {
+      const g = this.footGoal[i];
+      const side = i === 0 ? -1 : 1;
+      const off = i === 0 ? pose.fL : pose.fR;
+      const pw = this.footPosWeight[i];
+      if (pw < 1) {
+        // Off the board: the foot hangs from its hip with the knee bent, plus the pose flick.
+        this.hip.set(0, -RIG.hipDrop, side * RIG.hipHalfWidth).applyQuaternion(this.pelvisLocalQ).add(this.pelvisLocal);
+        this.tmp.copy(this.hip).addScaledVector(this.pelvisUp, -(RIG.upperLeg + RIG.lowerLeg) * 0.82);
+        g.lerp(this.tmp, 1 - pw);
+      }
+      g.x += off[0];
+      g.y += off[1];
+      g.z += off[2];
+    }
+    // Ragdoll legs: feet trail behind and up, like a trip.
+    if (gw.legs < 1) {
+      this.tmp.set(fl.x - 0.1, fl.y + 0.25, fl.z + 0.45);
+      fl.lerp(this.tmp, 1 - gw.legs);
+      this.tmp.set(fr.x + 0.15, fr.y + 0.15, fr.z + 0.4);
+      fr.lerp(this.tmp, 1 - gw.legs);
     }
     // The pushing (or flailing) back foot may hover short of its goal; it must not drag the
     // pelvis down after it. Only feet that carry the body get to tilt the pelvis.
-    const canTilt = [true, !pushing && !bailed];
+    const canTilt = [this.footPosWeight[0] >= 1 && !bailed, !pushing && !bailed && this.footPosWeight[1] >= 1];
 
     // Legs: hips from the pelvis, two-bone solve, knees over the toes. Over-reach tilts the pelvis.
     for (let pass = 0; pass < 2; pass++) {
@@ -229,7 +303,7 @@ export class SkaterRig {
       const side = i === 0 ? -1 : 1;
       const legNames = i === 0 ? (['upperLegL', 'lowerLegL', 'footL'] as const) : (['upperLegR', 'lowerLegR', 'footR'] as const);
       this.hip.set(0, -RIG.hipDrop, side * RIG.hipHalfWidth).applyQuaternion(this.pelvisLocalQ).add(this.pelvisLocal);
-      const angle = i === 0 ? RIG.frontFootAngle : RIG.backFootAngle;
+      const angle = (i === 0 ? RIG.frontFootAngle + pose.yawL : RIG.backFootAngle + pose.yawR);
       this.toe.set(Math.cos(angle), 0, -Math.sin(angle));
       this.pole.copy(this.toe).addScaledVector(Y, 0.45);
       solveTwoBone(this.hip, this.footGoal[i], RIG.upperLeg, RIG.lowerLeg, this.pole, RIG.maxReach, this.knee, this.ankle);
@@ -243,8 +317,11 @@ export class SkaterRig {
     // crouch, speed and grabs, and counter-rolls halfway back toward world up against the lean.
     this.anchor.set(0, 0.06, 0).applyQuaternion(this.pelvisLocalQ).add(this.pelvisLocal);
     this.torsoDir.copy(this.pelvisUp).lerp(this.worldUpLocal, 0.5).normalize();
-    let pitch = 0.45 * w.charge + 0.22 * Math.min(1, Math.abs(w.speed) / 12) + (w.grabbing ? 0.45 : 0) + (bailed ? 0.9 : 0) + (grinding ? 0.15 : 0);
+    let pitch = 0.45 * w.charge + 0.22 * Math.min(1, Math.abs(w.speed) / 12) + (w.grabbing ? 0.45 : 0) + (grinding ? 0.15 : 0) + pose.chestPitch;
     if (inAir && !w.grabbing) pitch -= 0.1;
+    // Ragdoll torso: as the weight drops the chest target slumps forward and the spring stiffness
+    // falls away, so gravity and the distance constraint take over (a faceplant, in practice).
+    pitch += 1.2 * (1 - gw.torso);
     // Pitch about the body's left-right axis (Z): forward is +X.
     this.q2.setFromAxisAngle(Z, -pitch);
     this.torsoDir.applyQuaternion(this.q2);
@@ -253,12 +330,14 @@ export class SkaterRig {
     if (!this.primed) {
       this.chest.reset(this.target);
     }
-    this.verlet(this.chest, this.target, dt);
+    this.verlet(this.chest, this.target, dt, gw.torso);
     this.chest.constrainDistance(this.anchor, torsoLen);
 
     // Chest frame: up along the torso, front toward +X twisted a little toward the nose with speed.
     this.chestUp.subVectors(this.chest.pos, this.anchor).normalize();
-    this.chestFront.set(1, 0, -0.35 * Math.min(1, Math.abs(w.speed) / 10) * Math.sign(w.speed || 1));
+    // Twist: shoulders open toward the nose with speed, plus the pose's twist (spins, boardslides).
+    const twist = 0.35 * Math.min(1, Math.abs(w.speed) / 10) * Math.sign(w.speed || 1) + pose.chestTwist;
+    this.chestFront.set(Math.cos(twist), 0, -Math.sin(twist));
     this.chestFront.addScaledVector(this.chestUp, -this.chestFront.dot(this.chestUp)).normalize();
     this.chestSide.crossVectors(this.chestFront, this.chestUp).normalize(); // body left-right (≈ ±Z)
     // Spine bones share the torso direction; a real spine would curve, this is enough at 12 fps.
@@ -287,7 +366,8 @@ export class SkaterRig {
       if (w.grabbing && i === 1) {
         this.target.set(0.04, 0.02, 0.36); // tail of the deck in board space
       } else if (bailed) {
-        this.target.addScaledVector(this.chestSide, side * 0.4).addScaledVector(this.chestFront, 0.3);
+        // Hands go forward to break the fall; the ramp then hands them to gravity.
+        this.target.addScaledVector(this.chestSide, side * 0.3).addScaledVector(this.chestFront, 0.45).addScaledVector(this.chestUp, -0.1);
       } else if (inAir) {
         this.target.addScaledVector(this.chestSide, side * 0.38).addScaledVector(this.chestUp, 0.12).addScaledVector(this.chestFront, 0.05);
       } else {
@@ -296,8 +376,10 @@ export class SkaterRig {
         this.target.addScaledVector(X, -0.25 * lean).addScaledVector(Y, 0.2 * Math.abs(lean)); // balance
         if (grinding) this.target.addScaledVector(this.chestSide, side * 0.15).addScaledVector(this.chestUp, 0.15);
       }
+      const ho = i === 0 ? pose.hL : pose.hR;
+      this.target.addScaledVector(this.chestFront, ho[0]).addScaledVector(this.chestUp, ho[1]).addScaledVector(this.chestSide, ho[2]);
       if (!this.primed) hand.reset(this.target);
-      this.verlet(hand, this.target, dt);
+      this.verlet(hand, this.target, dt, i === 0 ? gw.armL : gw.armR);
       hand.constrainRange(this.shoulder, 0.18, (RIG.upperArm + RIG.foreArm) * RIG.maxReach);
 
       this.pole.copy(this.chestFront).multiplyScalar(-0.6).addScaledVector(this.chestUp, -0.5).addScaledVector(this.chestSide, side * 0.4);
@@ -312,17 +394,27 @@ export class SkaterRig {
     // during flips, shuvs, grabs and bails, when it just follows the chest.
     this.neckTop.copy(this.neckOrigin).addScaledVector(this.chestUp, RIG.neck);
     this.aim('neck', this.neckOrigin, this.neckTop, this.chestFront);
-    const midTrick = Math.abs(w.flip % (2 * Math.PI)) > 0.1 || Math.abs(w.shuv % Math.PI) > 0.1;
-    const lookAllowed = !midTrick && !w.grabbing && !bailed;
+    const midTrick = !w.caughtL || !w.caughtR;
+    const lookAllowed = !midTrick && !w.grabbing && !bailed && gw.head > 0.99;
     this.target.copy(this.chestFront);
     if (lookAllowed) {
-      // Where the line goes: along the nose (or tail when fakie), level, from over the front shoulder.
+      // Where the line goes: along the nose (or tail when fakie), level, from over the front
+      // shoulder; grinds look down the edge. The pose's head yaw adds on top.
       this.target.set(0.55, 0.05, -Math.sign(w.speed || 1) * 0.85).normalize();
+      if (pose.headYaw !== 0) {
+        this.q2.setFromAxisAngle(this.chestUp, pose.headYaw);
+        this.target.applyQuaternion(this.q2);
+      }
       // Clamp to head limits relative to the chest.
       const yaw = Math.atan2(-this.target.z * this.chestFront.x + this.target.x * this.chestFront.z, this.target.dot(this.chestFront));
       const yawC = Math.max(-RIG.headYawMax, Math.min(RIG.headYawMax, yaw));
       this.q2.setFromAxisAngle(this.chestUp, yawC);
       this.target.copy(this.chestFront).applyQuaternion(this.q2);
+    }
+    if (gw.head < 1) {
+      // Ragdoll head: droops with the chest.
+      this.tmp.copy(this.chestFront).addScaledVector(this.chestUp, -0.8 * (1 - gw.head)).normalize();
+      this.target.lerp(this.tmp, 1 - gw.head);
     }
     this.lookDir.lerp(this.target, Math.min(1, dt * 8)).normalize();
     this.headTop.copy(this.neckTop).addScaledVector(this.chestUp, RIG.head);
@@ -342,11 +434,13 @@ export class SkaterRig {
     goal.y += 0.06 * Math.sin(Math.PI * onGround) * (1 - onGround);
   }
 
-  private verlet(p: Particle, target: Vector3, dt: number): void {
-    // Substep at 60 Hz for stability regardless of the sample rate.
+  /** Substep at 60 Hz for stability regardless of the sample rate. `weight` scales the pull toward
+   *  the target: 1 = posed, 0 = ragdoll (gravity and constraints only). */
+  private verlet(p: Particle, target: Vector3, dt: number, weight = 1): void {
     const n = Math.max(1, Math.round(dt * 60));
     const sub = dt / n;
-    for (let i = 0; i < n; i++) p.step(target, this.gravityLocal, RIG.verletStiffness, RIG.verletDrag, sub);
+    const k = RIG.verletStiffness * (0.02 + 0.98 * weight);
+    for (let i = 0; i < n; i++) p.step(target, this.gravityLocal, k, RIG.verletDrag * (weight > 0.5 ? 1 : 0.4), sub);
   }
 
   /**

@@ -5,6 +5,108 @@ overlay (4-finger tap, backquote key, or `?debug=1`).
 
 ---
 
+## Phase 6 — Tricks, Poses & Bails
+
+**Status:** complete. Sixteen-state animation machine, flip/scoop channels with a classifier, per-foot
+catch, steeze, a pose library of five composed keys, computed grind poses with a grind classifier and
+styling table, manuals, and bails as a per-body-group weight ramp. Determinism holds. Eight tricks
+land and read in silhouette; the classifier names what the player did on both board and edge.
+
+### What was built
+
+| Area | File | Note |
+|---|---|---|
+| Channels & classifiers | `src/sim/Tricks.ts` | Rose as channel targets; `classifyTrick(spin, flip, scoop)`; six board contacts; `classifyGrind(yaw, pitch, contact)`; `pivotForPitch` |
+| State machine | `src/sim/SkateWorld.ts` | `AnimState` (Skater XL's 16) derived every step from the physics state and its timers |
+| Steeze, catch | | Per-foot style channel from input cleanliness; per-foot `caughtL/R` with a sloppy-input delay |
+| Grind pose | | Stick X yaws the board on the edge (±90°), stick Y pitches it (±25°), the pivot contact sits on the edge |
+| Manual | | Stick hard back/forward at speed lifts a truck; never fails; disables pushing |
+| Bail ramp | | `bailRamp` smoothstepped 0→1 in 150 ms, back in 350 ms |
+| Pose library | `src/render/rig/Poses.ts` | 30-float `Pose`; five keys (setup, pop, peak, catch, land) composed from channel signs; grind styling table; manual pose |
+| Rig | `src/render/rig/SkaterRig.ts` | Pose offsets on the procedural base, per-foot position weights, six group weights into the Verlet layers |
+
+### Decisions
+
+**The trick is a point in channel space; the name is derived afterwards.** The rose sets targets
+for spin, flip and scoop. At landing the classifier reads the accumulated rotations and names them:
+"kickflip", "heelflip", "pop shuv", "360 shuv", "varial kickflip", "fs kickflip", "fs 180",
+"bs 180", and unplanned combinations ("hardflip", "360 flip", "laser flip") come out of the same
+function. A grind that pops into a trick starts its scoop from the grind yaw, so a boardslide-to-
+shuv is one continuous number.
+
+**Anim state is derived, physics state is not.** The controller keeps six physics states. The
+sixteen animation states are computed from them and their timers each step: Setup while charging,
+BeginPop for the 40 ms tail-down, Pop for the first 80 ms of flight, Release once a landing is
+predicted, Impact for 150 ms after touchdown, EnterCoping while the grind blend is under one,
+ExitCoping for 200 ms after leaving an edge. The rig reads the animation state; the physics never
+has to know about anticipation.
+
+**Feet leave the board with a position weight, not a pose.** On pop, if the board will rotate,
+both feet's position weight goes to 0: the foot hangs from its hip (knee bent) plus the pose
+library's flick, while its rotation still follows the board frame. The front foot catches when the
+channels finish; the back foot catches up to 120 ms later, scaled by (1 − back-foot steeze). On an
+ollie or a 180 the board does not rotate under the feet, so they stay planted.
+
+**Steeze is input cleanliness, one number per foot.** Front foot: how close the stick was to the
+wedge centre. Back foot: how full the charge was. Clean → bigger flick, more foot turn, higher
+tuck. Sloppy → less, and the late back-foot catch. Decays over 1.2 s after landing.
+
+**Poses are composed, not authored per trick.** Five keys are built from the trick's channel
+signs: the front foot flicks toward the toe side for a kickflip and the heel side for a heelflip,
+the back foot scoops for a shuv, shoulders wind against a spin. Every point in the channel space
+gets a coherent pose, including half-caught combinations, from about 60 lines.
+
+**Grind poses are computed.** Board yaw from stick X, pitch from stick Y, and the contact that
+carries the board (nose, front truck, centre, back truck, tail) chosen by pitch. The board centre
+is placed so that contact sits on the edge. Attach keeps whatever angle the board arrived at as the
+initial yaw while the body frame aligns to the edge, so there is no snap, and the yaw then relaxes
+to the stick. Classification: |yaw| > 60° boardslide; < 20° 50-50 / 5-0 / nosegrind / tail- and
+noseslide by contact; in between, crooked/overcrook nose-down and smith/feeble tail-down. Eleven
+labels index a small styling table of pelvis/arm/head offsets. That is all the per-grind data.
+
+**Bails are a weight ramp.** `bailRamp` feeds six body-group weights with a stagger (legs first,
+head last). Weight scales each Verlet particle's pull toward its pose target, so at 0 gravity and
+the distance constraints take over: the chest slumps forward, the arms flail, the head droops. The
+pelvis pitches forward and falls back behind the board, the feet trail behind. Recovery runs the
+ramp in reverse. No ragdoll physics was added; the Phase 5 springs and particles are the ragdoll.
+
+**Side-drop hold lengthened to 0.6 s.** Holding the stick sideways now yaws the board into a
+boardslide, which conflicted with Phase 4's 150 ms side-drop. Drop-off still exists; it takes a
+deliberate hold.
+
+### Measurements (scripted)
+
+| Test | Result |
+|---|---|
+| Eight rose directions from the flat at 7 u/s | all land, 0 bails; names: fs 180, fs kickflip, kickflip, heelflip, bs 180, pop shuv, 360 shuv, varial kickflip |
+| Anim state sequence on a kickflip | Riding → Setup → BeginPop → Pop → InAir → Release → Impact → Riding |
+| Catch sequence on flips/shuvs | both feet off, both catch; 180s and ollie: feet never leave |
+| Sloppy kickflip (off-centre wedge, short charge) | steeze 0.06 / 0.29, back foot catches 83 ms after the front |
+| Grind with stick neutral / back / fwd / right / left | 50-50 / 5-0 / nosegrind / fs boardslide / bs boardslide; diagonals give smith / overcrook |
+| Attach at 30° to the rail | yaw starts at −30°, relaxes to 0, no snap, lands |
+| Boardslide exit | board straightens in the air, lands at 0° |
+| Manual, stick back at 7 u/s | pitch 18°, no pushing during, ends on release |
+| Bail | ramp reaches 1, 0.9 s down, ramp back to 0 on recovery |
+
+### Known gaps, on purpose
+
+- Braking and Powerslide are in the enum but unmapped: the control scheme has no input left for
+  them, and the brief says "nothing else".
+- The score does not yet read the classifier (Phase 10).
+- One bail shape (the trip). Variety by impact direction is a Phase 8 juice pass.
+
+### Phone checklist for this phase
+
+1. Pop with the stick up, then up-left: kickflip and heelflip should flick opposite ways and the
+   feet should visibly leave and re-catch. A quick, off-centre pop should look sloppier.
+2. Pop with the stick down: the board spins flat under lifted feet.
+3. Grind the rail and push the stick sideways: the board turns to a boardslide and the body faces
+   down the rail. Pull back: 5-0. Push forward: nosegrind. Watch the `grind` row name each.
+4. Pull the stick hard back at speed on the flat: tail manual.
+5. Land sideways off something: one trip-and-faceplant, then back on the board.
+
+---
+
 ## Phase 5 — The Skater: Rig, IK & Procedural Motion
 
 **Status:** complete. A 20-bone skeleton with one procedurally skinned mesh, closed-form two-bone

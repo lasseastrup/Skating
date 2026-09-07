@@ -17,4 +17,4 @@ npm run build:single     # one-file dist/coping.html for hosting anywhere
 
 Scenes: `?scene=playground` (physics test bench, the default until Phase 7) and `?scene=main` (the game, an empty plane for now).
 
-See `DEBUG.md` for the per-phase decision log. Currently at **Phase 5 — The Skater: Rig, IK & Procedural Motion**.
+See `DEBUG.md` for the per-phase decision log. Currently at **Phase 6 — Tricks, Poses & Bails**.
