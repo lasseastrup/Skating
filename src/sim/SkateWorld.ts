@@ -3,6 +3,7 @@ import type { InputFrame } from '../core/Input';
 import { KinematicBody, type SimWorld } from '../core/Sim';
 import type { ProjectResult } from './Surface';
 import type { GrindPath } from './Grind';
+import { crossesWall } from './Walls';
 import { classifyGrind, classifyTrick, CONTACTS, OLLIE, pivotForPitch, ROSE, type Contact, type TrickTargets } from './Tricks';
 import type { Compound } from './surfaces/Compound';
 import { TUNING as T } from './Tuning';
@@ -185,6 +186,13 @@ export class SkateWorld implements SimWorld {
 
   // Private scratch. Allocated once; the step never allocates.
   private readonly cand = new Int32Array(MAX_CAND);
+  private readonly wallCand = new Int32Array(32);
+  private readonly prevPos = new Vector3();
+  mercies = 0;
+  slams = 0;
+  /** Test hook: the "no pushing" loop acceptance. */
+  debugNoPush = false;
+  pushes = 0;
   private readonly probe = new Vector3();
   private readonly pNose = new Vector3();
   private readonly pTail = new Vector3();
@@ -269,6 +277,9 @@ export class SkateWorld implements SimWorld {
     this.grindPitch = 0;
     this.grindContact = 'center';
     this.grindName = '50-50';
+    this.mercies = 0;
+    this.slams = 0;
+    this.pushes = 0;
     this.grindPath = null;
     this.grindT = 0;
     this.grindDir = 1;
@@ -371,8 +382,10 @@ export class SkateWorld implements SimWorld {
         this.stepEnergy(input, dt);
         this.stepManual(input, dt);
         this.stepPush(input, dt);
+        this.prevPos.copy(this.pos);
         this.pos.addScaledVector(this.tangent, this.speed * dt);
         this.distance += Math.abs(this.speed) * dt;
+        if (this.checkWalls(dt)) break;
         if (this.constrain(dt)) this.checkDetach();
         break;
       case SkateState.Pop:
@@ -457,6 +470,27 @@ export class SkateWorld implements SimWorld {
       this.binormal.crossVectors(this.tangent, this.normal).normalize();
       this.speed *= Math.max(0, 1 - T.carveDrag * this.yawRate * this.yawRate * dt);
     }
+    this.gravityTurn(dt);
+  }
+
+  /**
+   * Gravity turn. The wheels grip sideways only while they are pressed into the surface. When
+   * the normal force fades (riding along a near-vertical wall, hanging at a trough's rim) the
+   * lateral part of gravity is allowed to swing the velocity downhill, so a skater can never
+   * park on a wall. Full strength at zero normal force, nothing above `gravityTurnForce`.
+   */
+  private gravityTurn(dt: number): void {
+    const sp = Math.abs(this.speed);
+    if (sp < 0.5) return;
+    const w = 1 - Math.min(1, Math.max(0, this.normalForce / T.gravityTurnForce));
+    if (w <= 0) return;
+    // Downhill in the tangent plane, projected on the binormal: lateral gravity per unit mass.
+    const lateral = -T.gravity * this.binormal.y * w;
+    if (Math.abs(lateral) < 1e-4) return;
+    // v = speed·tangent; v' = v + lateral·b·dt → tangent turns by lateral·dt/speed toward b.
+    const turn = Math.max(-T.gravityTurnMaxRate * dt, Math.min(T.gravityTurnMaxRate * dt, (lateral * dt) / this.speed));
+    this.tangent.addScaledVector(this.binormal, turn).normalize();
+    this.binormal.crossVectors(this.tangent, this.normal).normalize();
   }
 
   // --- energy: gravity, weight shift, friction, pump ------------------------------------------
@@ -484,7 +518,7 @@ export class SkateWorld implements SimWorld {
     if (inTrans) {
       const sp = Math.abs(this.speed);
       const ramp = sp >= T.pumpMinSpeed ? 1 : sp / T.pumpMinSpeed;
-      const a = T.pumpEff * Math.min(k, T.pumpCurvatureCap) * this.pumpFactor * ramp;
+      const a = (T.pumpEff * Math.min(k, T.pumpCurvatureCap) + T.pumpBase) * this.pumpFactor * ramp;
       this.speed += (this.speed >= 0 ? 1 : -1) * a * dt;
     }
   }
@@ -511,11 +545,57 @@ export class SkateWorld implements SimWorld {
       input.stickY > T.pushSuppressStickY &&
       this.normal.y > 0.97 &&
       this.curvature < T.pushMaxCurvature;
-    if (wantsPush) {
+    if (wantsPush && !this.debugNoPush) {
       this.state = SkateState.Pushing;
       this.pushPhase = 0;
+      this.pushes++;
       this.pelvisV += T.pelvisPushDip;
     }
+  }
+
+  // --- walls: collision mercy or a slide along it ---------------------------------------------
+  /**
+   * Did this step's move cross a wall? Assist Charter: a lip or ledge you would have slammed into
+   * head-on auto-pops you over it if you had the speed to clear it. Otherwise the heading is
+   * deflected along the wall and you keep rolling, slower. Returns true if the state left the ground.
+   */
+  private checkWalls(dt: number): boolean {
+    const c = this.compound;
+    const n = c.queryWalls(this.pos, this.wallCand);
+    for (let i = 0; i < n; i++) {
+      const w = c.walls[this.wallCand[i]];
+      const t = crossesWall(this.prevPos, this.pos, w);
+      if (t < 0) continue;
+      const height = w.yTop - (this.prevPos.y - T.rideHeight);
+      if (height <= 0.03) continue;
+      const need = T.mercyMinSpeed + T.mercySpeedPerMetre * height;
+      if (height <= T.mercyMaxHeight && Math.abs(this.speed) >= need) {
+        // Mercy: pop over it. Plain ollie, feet stay on, keep speed.
+        this.mercies++;
+        this.pos.copy(this.prevPos).addScaledVector(this.tangent, this.speed * dt * Math.max(0, t - 0.05));
+        this.trick = OLLIE;
+        this.trickName = 'ollie';
+        const vPop = Math.sqrt(2 * T.gravity * (height + T.mercyClearance));
+        this.toAir(false);
+        this.vel.copy(this.tangent).multiplyScalar(this.speed).addScaledVector(this.normal, vPop);
+        this.pitch = T.popPitch;
+        this.pelvisV += T.pelvisPopKick;
+        this.armTrick();
+        return true;
+      }
+      // Slam: slide along the wall.
+      this.slams++;
+      this.tmp.set(w.bx - w.ax, 0, w.bz - w.az).normalize();
+      const along = this.tangent.dot(this.tmp);
+      this.tmp.multiplyScalar(along >= 0 ? 1 : -1);
+      this.pos.copy(this.prevPos);
+      this.tangent.copy(this.tmp).addScaledVector(this.normal, -this.tmp.dot(this.normal)).normalize();
+      this.binormal.crossVectors(this.tangent, this.normal).normalize();
+      this.speed *= T.wallSlideFactor * Math.abs(along);
+      this.pelvisV -= 1.5;
+      return false;
+    }
+    return false;
   }
 
   // --- constrain to the manifold ----------------------------------------------------------------
@@ -1255,6 +1335,7 @@ export class SkateWorld implements SimWorld {
     kv('landings', `${this.landings}  bails ${this.bails}  last mis ${this.lastMisalignDeg.toFixed(0)}°`);
     kv('grind', this.grindPath ? `${this.grindName}  ${this.grindPath.id}  yaw ${(this.grindYaw / D).toFixed(0)}° pitch ${(this.grindPitch / D).toFixed(0)}°${this.prevButton ? '  lock' : ''}` : `—  (${this.grinds}, ${this.grindDistance.toFixed(0)} m)`);
     kv('manual', `${this.manual.toFixed(2)}  bailRamp ${this.bailRamp.toFixed(2)}`);
+    kv('walls', `mercy ${this.mercies}  slams ${this.slams}`);
     kv('curv', `${this.curvature.toFixed(3)} /m  N ${this.normalForce.toFixed(1)}`);
     kv('pump', this.inTransition ? `${this.pumpFactor.toFixed(1)} (${this.transitions})` : `— (${this.transitions})`);
     kv('yawRate', `${this.yawRate.toFixed(2)} rad/s`);

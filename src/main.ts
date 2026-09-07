@@ -9,6 +9,7 @@ import { GameRenderer } from './render/Renderer';
 import { MainScene } from './scenes/MainScene';
 import { PlaygroundScene } from './scenes/PlaygroundScene';
 import type { GameScene } from './scenes/SceneBase';
+import { buildIslandPark, ISLAND } from './sim/ParkLayout';
 import { buildPlaygroundPark, PLAYGROUND } from './sim/Playground';
 import { SkateWorld } from './sim/SkateWorld';
 import { TUNING } from './sim/Tuning';
@@ -20,8 +21,7 @@ const SCENES: Record<string, () => GameScene> = {
 
 function boot(): void {
   const params = new URLSearchParams(location.search);
-  // Default to the playground until Phase 7 gives the main scene a park. Override with ?scene=main.
-  const sceneName = params.get('scene') && SCENES[params.get('scene')!] ? params.get('scene')! : 'playground';
+  const sceneName = params.get('scene') && SCENES[params.get('scene')!] ? params.get('scene')! : 'main';
 
   const canvas = document.getElementById('game') as HTMLCanvasElement;
   const gfx = new GameRenderer(canvas);
@@ -112,6 +112,7 @@ function boot(): void {
     snapshot: () => overlay.snapshot(loop.stats),
     runDeterminism: (steps?: number, seed?: number) => runDeterminismTest(makeWorld, steps, seed),
     makeWorld,
+    makePlaygroundWorld,
     simDt: SIM_DT,
     input,
     frame,
@@ -120,8 +121,13 @@ function boot(): void {
   (window as unknown as { __coping: unknown }).__coping = hook;
 }
 
-/** Fresh world factory for determinism testing: the full playground manifold, no display. */
+/** Fresh world factory for determinism testing: the full island manifold, no display. */
 function makeWorld(): SimWorld {
+  return new SkateWorld(buildIslandPark().builder.compound, ISLAND.spawn);
+}
+
+/** The playground world, for the test bench scripts. */
+function makePlaygroundWorld(): SimWorld {
   return new SkateWorld(buildPlaygroundPark().builder.compound, PLAYGROUND.spawn);
 }
 

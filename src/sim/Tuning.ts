@@ -21,6 +21,10 @@ export const TUNING = {
    *  carve is nearly free and a tight tic-tac is not. At 1.4 rad/s that is ~10%/s. */
   carveDrag: 0.05,
 
+  /** Gravity turn: below this normal force (m/s²) lateral gravity starts swinging the heading
+   *  downhill; full effect at zero normal force. Max heading rate from it, rad/s. */
+  gravityTurnForce: 11,
+  gravityTurnMaxRate: 6,
   /** Yaw rate at full stick and zero speed. */
   turnRateBase: 3.0,
   /** Yaw rate halves at this speed: rate = base / (1 + speed / ref). Sharp when slow, wide arcs when fast. */
@@ -99,7 +103,10 @@ export const TUNING = {
   pumpCurvatureMin: 0.12,
   /** Pump: accel = pumpEff · κ · factor (pumpEff in m²/s²). Work per pass = pumpEff·Δθ, a fixed
    *  energy per pass, so speed gain shrinks as you get faster and friction can balance it. */
-  pumpEff: 9,
+  pumpEff: 11,
+  /** Extra pump accel (m/s²) that does not scale with curvature: bigger transitions give more
+   *  energy per pass (work = a · arc length), the way a long extension does for a real skater. */
+  pumpBase: 0,
   /** Curvature is capped here for pumping so a tight channel doesn't hand out free energy. */
   pumpCurvatureCap: 0.45,
   /** Pump fades to zero below this speed. */
@@ -199,4 +206,14 @@ export const TUNING = {
   /** Bail weight ramp: into ragdoll, back to posed. */
   bailRampIn: 0.15,
   bailRampOut: 0.35,
+
+  // --- Phase 7: walls and collision mercy ---------------------------------------------------------
+  /** Auto-pop over a wall you would slam if speed ≥ min + perMetre × wall height, up to maxHeight. */
+  mercyMinSpeed: 2.5,
+  mercySpeedPerMetre: 3.0,
+  mercyMaxHeight: 1.3,
+  /** Clearance above the top edge the mercy pop aims for. */
+  mercyClearance: 0.12,
+  /** Slamming without mercy: heading is deflected along the wall and speed scaled by this. */
+  wallSlideFactor: 0.55,
 } as const;

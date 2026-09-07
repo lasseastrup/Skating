@@ -57,7 +57,14 @@ export class TroughSurface implements RideSurface {
     const eu = this.e.dot(this.up);
     let phi = Math.atan2(er, -eu);
     const s = this.path.arcAt(t);
-    out.margin = Math.min(this.rho * (this.phiMax - Math.abs(phi)), s, this.path.totalLength - s);
+    // Along-path margin: past either end the closest parameter clamps, so measure the overshoot
+    // along the tangent and make the margin negative by that much. Without this a channel claimed
+    // every point beyond its mouth.
+    let along = Math.min(s, this.path.totalLength - s);
+    const over = (p.x - this.P.x) * this.T.x + (p.y - this.P.y) * this.T.y + (p.z - this.P.z) * this.T.z;
+    if (t >= 1 - 1e-6 && over > 0) along = -over;
+    else if (t <= 1e-6 && over < 0) along = over;
+    out.margin = Math.min(this.rho * (this.phiMax - Math.abs(phi)), along);
     if (phi < -this.phiMax) phi = -this.phiMax;
     else if (phi > this.phiMax) phi = this.phiMax;
     const sp = Math.sin(phi);
@@ -90,6 +97,8 @@ export class TroughSurface implements RideSurface {
 export class SplineStripHole implements Bounds2D {
   private readonly p = new Vector3();
   private readonly q = new Vector3();
+  private readonly tan = new Vector3();
+  private readonly k = new Vector3();
   constructor(
     readonly path: SplinePath,
     readonly halfWidth: number,
@@ -98,14 +107,25 @@ export class SplineStripHole implements Bounds2D {
     readonly V: Vector3,
   ) {}
 
+  /**
+   * Distance from the strip. Past either end the strip stops dead (a channel has an end face,
+   * not a round nose): points beyond the end plane report halfWidth + overshoot, so the ground
+   * is intact right up to the cap.
+   */
   private dist(u: number, v: number): number {
     this.p.copy(this.origin).addScaledVector(this.U, u).addScaledVector(this.V, v);
     const t = this.path.closestT(this.p);
-    this.path.evaluate(t, this.q);
+    this.path.frame(t, this.q, this.tan, this.k);
     // Distance in the plane only (the path may sit below the plane).
-    this.q.sub(this.p);
+    this.q.sub(this.p).negate(); // p - q
     const du = this.q.dot(this.U);
     const dv = this.q.dot(this.V);
+    const tu = this.tan.dot(this.U);
+    const tv = this.tan.dot(this.V);
+    const tl = Math.hypot(tu, tv) || 1;
+    const over = (du * tu + dv * tv) / tl;
+    if (t >= 1 - 1e-6 && over > 0) return this.halfWidth + over;
+    if (t <= 1e-6 && over < 0) return this.halfWidth - over;
     return Math.hypot(du, dv);
   }
 

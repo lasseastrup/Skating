@@ -111,3 +111,44 @@ export class AnnularSectorBounds implements Bounds2D {
     uv.v = this.cv + r * Math.sin(a);
   }
 }
+
+/**
+ * Rectangle with rounded corners, centred at (cu, cv), half sizes (hu, hv) of the *straight*
+ * part, corner radius rc. Signed-distance based, so margins are exact metres.
+ */
+export class RoundedRectBounds implements Bounds2D {
+  constructor(
+    readonly cu: number,
+    readonly cv: number,
+    readonly hu: number,
+    readonly hv: number,
+    readonly rc: number,
+  ) {}
+
+  margin(u: number, v: number): number {
+    const qu = Math.abs(u - this.cu) - this.hu;
+    const qv = Math.abs(v - this.cv) - this.hv;
+    const outside = Math.hypot(Math.max(qu, 0), Math.max(qv, 0));
+    const inside = Math.min(Math.max(qu, qv), 0);
+    return this.rc - (outside + inside);
+  }
+
+  /** Move toward the boundary along the SDF gradient (one Newton-ish step, exact for this shape). */
+  private toBoundary(uv: UV): void {
+    const m = this.margin(uv.u, uv.v);
+    const e = 1e-4;
+    const gu = (this.margin(uv.u + e, uv.v) - this.margin(uv.u - e, uv.v)) / (2 * e);
+    const gv = (this.margin(uv.u, uv.v + e) - this.margin(uv.u, uv.v - e)) / (2 * e);
+    const gl = Math.hypot(gu, gv) || 1;
+    uv.u += (gu / gl) * m;
+    uv.v += (gv / gl) * m;
+  }
+
+  clamp(uv: UV): void {
+    if (this.margin(uv.u, uv.v) < 0) this.toBoundary(uv);
+  }
+
+  pushOut(uv: UV): void {
+    if (this.margin(uv.u, uv.v) > 0) this.toBoundary(uv);
+  }
+}

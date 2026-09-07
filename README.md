@@ -15,6 +15,6 @@ npm run check:perf       # headless perf budgets + determinism gate
 npm run build:single     # one-file dist/coping.html for hosting anywhere
 ```
 
-Scenes: `?scene=playground` (physics test bench, the default until Phase 7) and `?scene=main` (the game, an empty plane for now).
+Scenes: `?scene=main` (the park, default) and `?scene=playground` (physics test bench).
 
-See `DEBUG.md` for the per-phase decision log. Currently at **Phase 6 — Tricks, Poses & Bails**.
+See `DEBUG.md` for the per-phase decision log. Currently at **Phase 7 — The Island: One Loopable Park**.

@@ -1,5 +1,6 @@
 import { Vector3 } from 'three';
 import type { GrindPath } from '../Grind';
+import type { WallSeg } from '../Walls';
 import { ProjectResult, type RideSurface } from '../Surface';
 
 const MAX_CANDIDATES = 24;
@@ -14,6 +15,9 @@ export class Compound {
   readonly neighbours: number[][] = [];
   /** Grindable edges. Few enough to test them all every air step. */
   readonly grinds: GrindPath[] = [];
+  /** Vertical walls the grounded skater can hit. Tested against the cell hash by position. */
+  readonly walls: WallSeg[] = [];
+  private readonly wallHash = new Map<number, number[]>();
   /** Preallocated projection results, one per candidate slot. */
   readonly results: ProjectResult[] = [];
   private readonly cellSize: number;
@@ -40,6 +44,34 @@ export class Compound {
     return this.grinds.length - 1;
   }
 
+  addWall(w: WallSeg): void {
+    this.walls.push(w);
+  }
+
+  /** Walls whose segment touches the cell of p or its neighbours. Writes into `out`, returns count. */
+  queryWalls(p: Vector3, out: Int32Array): number {
+    const cs = this.cellSize;
+    const cx = Math.floor(p.x / cs);
+    const cz = Math.floor(p.z / cs);
+    let n = 0;
+    this.wallStamp++;
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dz = -1; dz <= 1; dz++) {
+        const list = this.wallHash.get(this.key(cx + dx, cz + dz));
+        if (!list) continue;
+        for (let i = 0; i < list.length && n < out.length; i++) {
+          const idx = list[i];
+          if (this.wallSeen[idx] === this.wallStamp) continue;
+          this.wallSeen[idx] = this.wallStamp;
+          out[n++] = idx;
+        }
+      }
+    }
+    return n;
+  }
+  private wallSeen = new Int32Array(0);
+  private wallStamp = 0;
+
   /** Declare that a skater may roll directly between a and b (they share an edge). */
   connect(a: number, b: number): void {
     if (!this.neighbours[a].includes(b)) this.neighbours[a].push(b);
@@ -65,6 +97,26 @@ export class Compound {
           if (!list) {
             list = [];
             this.hash.set(key, list);
+          }
+          list.push(i);
+        }
+      }
+    }
+    // Walls: rasterise each segment's cells.
+    this.wallSeen = new Int32Array(Math.max(1, this.walls.length));
+    for (let i = 0; i < this.walls.length; i++) {
+      const w = this.walls[i];
+      const x0 = Math.floor(Math.min(w.ax, w.bx) / cs) - 1;
+      const x1 = Math.floor(Math.max(w.ax, w.bx) / cs) + 1;
+      const z0 = Math.floor(Math.min(w.az, w.bz) / cs) - 1;
+      const z1 = Math.floor(Math.max(w.az, w.bz) / cs) + 1;
+      for (let x = x0; x <= x1; x++) {
+        for (let z = z0; z <= z1; z++) {
+          const key = this.key(x, z);
+          let list = this.wallHash.get(key);
+          if (!list) {
+            list = [];
+            this.wallHash.set(key, list);
           }
           list.push(i);
         }

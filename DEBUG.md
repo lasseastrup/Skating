@@ -5,6 +5,113 @@ overlay (4-finger tap, backquote key, or `?debug=1`).
 
 ---
 
+## Phase 7 — The Island: One Loopable Park
+
+**Status:** complete. The main scene is now the island: plaza, mini-ramp with spine, kicker, a walled
+roll-in chute into a 64°-banked snake run, a two-room sunken pool with a bank between the ends, a vert
+half-pipe with an extension, and a roller track back to the plaza. 77 ride surfaces, 31 grind edges,
+58 wall segments, 25 draw calls, 25.5k triangles, determinism holds. The loop rides end to end in
+scripted tests: plaza → kicker → chute → snake run → shallow end in 11 s with no bail, the rollers
+carry the return leg with no pushing, and both pool rooms pump out to the deck.
+
+### What was built
+
+| Area | File | Note |
+|---|---|---|
+| Park builder | `src/sim/Park.ts` | `kicker`, `roller`, `platform` (stairs + hubba), `bowlRoom` (rounded-rect pool: torus corners, cylinder walls, coping), `bankX`, `trough`, `groundHoleRect`, `linkGround`; quarter pipes take an `extension` |
+| Layout | `src/sim/ParkLayout.ts` | `ISLAND`: every number the sim and the meshes share. `buildIslandPark()` wires adjacency and walls |
+| Walls | `src/sim/Walls.ts` | `WallSeg` + `crossesWall` segment test; `Compound.walls` in the spatial hash |
+| Collision mercy | `src/sim/SkateWorld.ts` | `checkWalls` after the grounded move: pop over a wall you can clear, else slide along it and lose speed |
+| Gravity turn | `src/sim/SkateWorld.ts` | Lateral gravity swings the heading downhill as the normal force fades — you can't park on a wall |
+| Bounds | `src/sim/surfaces/Bounds.ts` | `RoundedRectBounds` (SDF) for pool floors |
+| Channel | `src/sim/surfaces/Trough.ts` | Along-path margin goes negative past the ends; the ground hole strip stops dead at the ends too |
+| Meshes | `src/scenes/FeatureMeshes.ts` | Kicker, roller, platform, pool room, bank + side faces, channel cap, adaptive ground grid around holes |
+| Scene | `src/scenes/MainScene.ts` | Builds the island once from the spec; fog to hide the horizon |
+
+### Decisions
+
+**The deck is the ground.** Sunken features (pool, snake run, roll-in, bank) cut holes in the ground
+plane rather than adding decks on top. Coping sits at y = 0, so anything you roll off the edge of drops
+you into a transition, and the ground grid's adaptive subdivision (0.25 m at hole edges) makes the rims
+read as curves.
+
+**The snake run is banked, not vertical.** The first channel had a semicircular profile with vertical
+rims (ρ = 1.8). Energy conservation made it unrideable: you enter from the deck at ground-level energy,
+so every wall climb returns you to the rim, and the auto-pump then fired you out into the plaza. The
+channel is now ρ = 3.2, φmax = 64° (still 1.8 m deep): a rider carried to the rim rolls onto the deck
+instead of flying, and steering along the channel keeps you in it. Bends have radius ≥ 8 m against a
+rim half-width of 2.9 m so the surface never folds. The roll-in feeds along the channel axis, not into
+a wall.
+
+**The roll-in is a walled chute.** A flat bank cannot meet a curved channel across its full width, so
+the chute is 2 m wide (mismatch at the edges 0.3 m, inside the hand-off tolerance), walled on both
+sides, and the rest of the channel's start face is a capped wall. Riding the chute's very edge at
+4 u/s hands off cleanly to the channel.
+
+**Pool rooms are as wide as the channel.** The snake run enters the shallow end through its straight
+west edge, so both rooms are 5.8 m wide between their corners and the bank between them is exactly
+that wide: no void opens beside the bank, and the bank's side walls exist only over the 1.9 m of deck
+that actually lies beside it.
+
+**Gravity turn.** The controller has no lateral velocity by design, which let a skater ride along a
+vertical rim forever at zero normal force. Now the lateral part of gravity swings the velocity
+downhill, weighted from 0 at 11 m/s² normal force to 1 at zero. Riding straight up a wall (binormal
+horizontal) is untouched; hanging on a wall is not.
+
+**Collision mercy is a wall test, not a surface test.** Walls are vertical segments (ledge sides, ramp
+caps, chute and bank sides, stair faces). After the grounded move, a crossed wall you have the speed to
+clear (2.5 u/s + 3 u/s per metre, up to 1.3 m) becomes an ollie with your speed kept; anything else is
+a slide along the wall at 55% × |cos| of your speed. The mercy never fires from a stop.
+
+**Kickers are small.** At 2× gravity a 0.65 m kicker needs 5.4 u/s just to reach its lip, which is
+near max push speed. They are now 0.37 m (22°, 0.7 m bank): clear at 4 u/s, land 1.5 m out, roll
+into the chute.
+
+**Pump efficiency 9 → 11.** With the pool rooms widened, timed pumps across the deep end only just
+reached the deck at 9. At 11: auto-pumping in either room slowly builds instead of draining (Assist
+Charter: the speed floor), timed pumps climb out of both rooms, the vert wall reaches coping in eight
+timed pumps from 4 u/s and stays below it on auto-pump alone. The cost is the mini-ramp: an unsteered
+rider ends up 1.5 m above its coping. A `pumpBase` knob (extra accel independent of curvature) exists
+at 0 for later balancing.
+
+### Measurements (scripted, 120 Hz)
+
+| Test | Result |
+|---|---|
+| Plaza → kicker → chute → snake → shallow end (autopilot steering, timed taps) | 10.7 s, arrives at 10.4 u/s, 0 bails, 0 slams |
+| Chute edge (z offset 0.9 of 1.0) at 4 u/s | hands off to the channel at 9.1 u/s |
+| Roller return, 6 u/s start, no pushing | plaza in 13.7 s at ~5 u/s |
+| Deep end across Z, timed pumps from 3 u/s | above deck (+1.33 m) in 13 oscillations |
+| Shallow end across Z, timed / auto | +0.63 m in 12 / slowly climbing from −1.48 |
+| Vert half-pipe from 4 u/s, timed / auto | coping (3.6 m) in 8 / plateau 2.7 m |
+| Mini-ramp from 3 u/s, auto | 2.8 m peak (coping 1.3 m) after 14 oscillations |
+| Kicker at 7 u/s | launches at 5.0 u/s, lands 1.3 m out at 4.6 u/s |
+| Draw calls / tris (island) | 25 / 25.5k |
+| Determinism (2400 steps) | OK |
+
+### Known gaps, on purpose
+
+- The autopilot used for the loop test steers crudely; a straight unsteered rider through the snake
+  run still climbs to the rim and rolls onto the deck at the bends. A player carving stays in.
+- The channel end inside the shallow end overlaps the room's floor for 1 m; the hand-off is exact
+  on the centre line and a small drop off-centre.
+- Rooms ridden along their long axis (15 m of floor) drain; pump across the short axis.
+- The vert half-pipe is meant to be entered from the deep end's deck or a drop-in; from a standing
+  start on the flat it takes eight timed pumps.
+- No decoration, props or paint: the island is grey concrete until Phase 8.
+
+### Phone checklist for this phase
+
+1. Push across the plaza, hit the kicker, land, roll down the chute into the snake run. Steer with
+   the channel through the S; you should arrive in the shallow end still rolling.
+2. Pump across the shallow end, roll over the bank into the deep end, pump out onto the deck.
+3. Drop into the vert half-pipe from the deck. Two or three timed pumps should put you above coping.
+4. Roll off the deck onto the roller track. Tap the button on each roller face; you should reach the
+   plaza without pushing.
+5. Aim at a ledge side at speed: you pop over it. Roll into it slowly: you slide along it.
+
+---
+
 ## Phase 6 — Tricks, Poses & Bails
 
 **Status:** complete. Sixteen-state animation machine, flip/scoop channels with a classifier, per-foot
