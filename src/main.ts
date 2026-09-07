@@ -20,7 +20,8 @@ const SCENES: Record<string, () => GameScene> = {
 
 function boot(): void {
   const params = new URLSearchParams(location.search);
-  const sceneName = params.get('scene') && SCENES[params.get('scene')!] ? params.get('scene')! : 'main';
+  // Default to the playground until Phase 7 gives the main scene a park. Override with ?scene=main.
+  const sceneName = params.get('scene') && SCENES[params.get('scene')!] ? params.get('scene')! : 'playground';
 
   const canvas = document.getElementById('game') as HTMLCanvasElement;
   const gfx = new GameRenderer(canvas);
