@@ -1,4 +1,6 @@
 import {
+  BufferAttribute,
+  BufferGeometry,
   CylinderGeometry,
   DoubleSide,
   ExtrudeGeometry,
@@ -11,51 +13,50 @@ import {
 import { ParametricGeometry } from 'three/addons/geometries/ParametricGeometry.js';
 import type { CameraTarget } from '../render/CameraRig';
 import { SkaterPlaceholder } from '../render/SkaterPlaceholder';
+import type { QuarterPipeSpec } from '../sim/Park';
+import { buildPlaygroundPark, PLAYGROUND } from '../sim/Playground';
 import { SkateWorld } from '../sim/SkateWorld';
-import { buildGround, buildLighting, DARK_PROP, GREY_PROP, type GameScene } from './SceneBase';
+import type { PlaneSurface } from '../sim/surfaces/Plane';
+import type { TroughSurface } from '../sim/surfaces/Trough';
+import { buildLighting, DARK_PROP, GREY_GROUND, GREY_PROP, type GameScene } from './SceneBase';
 
 const SUN_OFFSET = new Vector3(18, 30, 12);
 const CONCAVE = new MeshLambertMaterial({ color: 0x8a8a8a, side: DoubleSide });
 
 /**
- * The physics test bench. Separate from the game: a flat plane, one quarter pipe, one rail,
- * one bowl corner. Every surface phase is validated here before touching the real park.
- *
- * Phase 0: visual meshes only. Phase 2 fits analytic primitives to exactly these dimensions,
- * so the constants below are the contract, not decoration.
+ * The physics test bench. Surfaces come from `buildPlaygroundPark()`; the meshes here are fitted
+ * to the same spec numbers. The primitive is the truth, the mesh is the picture.
  */
-export const PLAYGROUND = {
-  quarterPipe: { radius: 2.4, width: 6, vertExt: 0.3, deckDepth: 1.2, pos: new Vector3(-12, 0, 0) },
-  rail: { length: 5, height: 0.45, radius: 0.03, pos: new Vector3(4, 0, -8) },
-  bowlCorner: { wallRadius: 6, transRadius: 1.8, vertExt: 0.2, pos: new Vector3(10, 0, 10) },
-} as const;
-
 export class PlaygroundScene implements GameScene {
   readonly name = 'playground';
   readonly three = new Scene();
-  /** Spawn on the flat, looking across the rail toward the quarter pipe so the props are in frame. */
-  readonly world = new SkateWorld({ x: 2, z: 8, heading: 0.95 });
+  readonly world: SkateWorld;
   private readonly skater: SkaterPlaceholder;
   private readonly sun;
   private readonly owned: Mesh[] = [];
   private readonly target: CameraTarget;
 
   constructor() {
+    const park = buildPlaygroundPark();
+    this.world = new SkateWorld(park.builder.compound, PLAYGROUND.spawn);
     this.sun = buildLighting(this.three, 14);
-    buildGround(this.three, 120);
+
+    const ground = park.builder.compound.surfaces[park.builder.ground] as PlaneSurface;
+    this.buildGroundWithHoles(ground, PLAYGROUND.groundHalfSize);
+
     this.skater = new SkaterPlaceholder(this.world);
     this.three.add(this.skater.group);
-    this.target = {
-      pos: this.skater.board.position,
-      forward: this.world.tangent,
-      up: this.world.normal,
-      speed: 0,
-      lean: 0,
-    };
+    this.target = { pos: this.skater.board.position, forward: this.world.tangent, up: this.world.normal, speed: 0, lean: 0 };
 
-    this.buildQuarterPipe();
+    const P = PLAYGROUND;
+    this.buildQuarterPipe(P.quarterPipe);
+    const hp = P.halfPipe;
+    const common = { zCenter: hp.zCenter, width: hp.width, radius: hp.radius, vertExt: hp.vertExt, deckDepth: hp.deckDepth };
+    this.buildQuarterPipe({ wallX: park.halfPipe.leftWallX, facing: 1, ...common });
+    this.buildQuarterPipe({ wallX: park.halfPipe.rightWallX, facing: -1, ...common });
     this.buildRail();
     this.buildBowlCorner();
+    for (const t of park.builder.troughs) this.buildTrough(t);
   }
 
   private add(m: Mesh): Mesh {
@@ -65,23 +66,52 @@ export class PlaygroundScene implements GameScene {
     return m;
   }
 
-  /** Quarter pipe facing +X. Skater approaches travelling -X and rides up the wall at local x=0. */
-  private buildQuarterPipe(): void {
-    const { radius: r, width, vertExt, deckDepth, pos } = PLAYGROUND.quarterPipe;
-    const s = new Shape();
-    s.moveTo(-deckDepth, 0);
-    s.lineTo(r, 0); // floor toe
-    s.absarc(r, r, r, -Math.PI / 2, Math.PI, true); // transition, clockwise up to (0, r)
-    s.lineTo(0, r + vertExt); // vert extension
-    s.lineTo(-deckDepth, r + vertExt); // deck
-    s.closePath();
-    const g = new ExtrudeGeometry(s, { depth: width, bevelEnabled: false, curveSegments: 24 });
-    g.translate(0, 0, -width / 2);
-    const m = this.add(new Mesh(g, GREY_PROP));
-    m.position.copy(pos);
+  /** Ground as a 2 m grid with cells inside any ride-surface hole removed, so channels show. */
+  private buildGroundWithHoles(ground: PlaneSurface, half: number): void {
+    const cell = 2;
+    const n = Math.ceil((2 * half) / cell);
+    const positions: number[] = [];
+    const index: number[] = [];
+    let vi = 0;
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < n; j++) {
+        const u0 = -half + i * cell;
+        const v0 = -half + j * cell;
+        // Sample 4 points inside the cell; skip cells entirely inside a hole.
+        let inside = 0;
+        for (const [a, b] of [[0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]]) {
+          if (ground.marginUV(u0 + a * cell, v0 + b * cell) > 0) inside++;
+        }
+        if (inside === 0) continue;
+        // u = x, v = -z
+        positions.push(u0, 0, -v0, u0 + cell, 0, -v0, u0 + cell, 0, -(v0 + cell), u0, 0, -(v0 + cell));
+        index.push(vi, vi + 2, vi + 1, vi, vi + 3, vi + 2);
+        vi += 4;
+      }
+    }
+    const g = new BufferGeometry();
+    g.setAttribute('position', new BufferAttribute(new Float32Array(positions), 3));
+    g.setIndex(index);
+    g.computeVertexNormals();
+    this.add(new Mesh(g, GREY_GROUND));
   }
 
-  /** Flat steel rail on two posts, running along Z. */
+  private buildQuarterPipe(s: QuarterPipeSpec): void {
+    const { radius: r, width, vertExt, deckDepth } = s;
+    const sh = new Shape();
+    sh.moveTo(-deckDepth, 0);
+    sh.lineTo(r, 0);
+    sh.absarc(r, r, r, -Math.PI / 2, Math.PI, true);
+    sh.lineTo(0, r + vertExt);
+    sh.lineTo(-deckDepth, r + vertExt);
+    sh.closePath();
+    const g = new ExtrudeGeometry(sh, { depth: width, bevelEnabled: false, curveSegments: 24 });
+    g.translate(0, 0, -width / 2);
+    if (s.facing < 0) g.scale(-1, 1, 1);
+    const m = this.add(new Mesh(g, GREY_PROP));
+    m.position.set(s.wallX, 0, s.zCenter);
+  }
+
   private buildRail(): void {
     const { length, height, radius, pos } = PLAYGROUND.rail;
     const bar = new CylinderGeometry(radius, radius, length, 10, 1);
@@ -97,50 +127,68 @@ export class PlaygroundScene implements GameScene {
   }
 
   /**
-   * Bowl corner: a quarter of a torus, inner lower surface. Wall is a vertical cylinder of
-   * radius R around the corner axis; transition radius r blends floor to wall.
-   *   d(φ) = R - r + r·sinφ,  y(φ) = r - r·cosφ,  φ∈[0,π/2]  (floor → vertical)
-   *   p(θ,φ) = (d·cosθ, y, d·sinθ),                θ∈[0,π/2]
+   * Bowl corner: torus transition, vertical lip, deck ring. Same parametrisation as the
+   * TorusSurface: d(ψ) = Rmaj + r·cosψ, y = r + r·sinψ, ψ ∈ [-π/2, 0].
    */
   private buildBowlCorner(): void {
-    const { wallRadius: R, transRadius: r, vertExt, pos } = PLAYGROUND.bowlCorner;
+    const s = PLAYGROUND.bowlCorner;
+    const r = s.transRadius;
+    const Rmaj = s.wallRadius - r;
+    const R = s.wallRadius;
+    const pos = new Vector3(s.x, 0, s.z);
+    const span = s.th1 - s.th0;
     const surf = new ParametricGeometry(
       (u, v, out) => {
-        const theta = u * (Math.PI / 2);
-        const phi = v * (Math.PI / 2);
-        const d = R - r + r * Math.sin(phi);
-        const y = r - r * Math.cos(phi);
-        out.set(d * Math.cos(theta), y, d * Math.sin(theta));
+        const th = s.th0 + u * span;
+        const ps = -Math.PI / 2 + (v * Math.PI) / 2;
+        const d = Rmaj + r * Math.cos(ps);
+        out.set(d * Math.cos(th), r + r * Math.sin(ps), d * Math.sin(th));
       },
       32,
       16,
     );
-    const m = this.add(new Mesh(surf, CONCAVE));
-    m.position.copy(pos);
-
-    // Vertical lip above the transition, then a flat deck ring outside the wall. Same (θ) convention
-    // as the transition surface so the three pieces share edges exactly.
+    this.add(new Mesh(surf, CONCAVE)).position.copy(pos);
     const lip = new ParametricGeometry(
       (u, v, out) => {
-        const theta = u * (Math.PI / 2);
-        out.set(R * Math.cos(theta), r + v * vertExt, R * Math.sin(theta));
+        const th = s.th0 + u * span;
+        out.set(R * Math.cos(th), r + v * s.vertExt, R * Math.sin(th));
       },
       32,
       1,
     );
     this.add(new Mesh(lip, CONCAVE)).position.copy(pos);
-
-    const DECK_W = 1.5;
     const deck = new ParametricGeometry(
       (u, v, out) => {
-        const theta = u * (Math.PI / 2);
-        const d = R + v * DECK_W;
-        out.set(d * Math.cos(theta), r + vertExt, d * Math.sin(theta));
+        const th = s.th0 + u * span;
+        const d = R + v * s.deckWidth;
+        out.set(d * Math.cos(th), r + s.vertExt, d * Math.sin(th));
       },
       32,
       1,
     );
     this.add(new Mesh(deck, CONCAVE)).position.copy(pos);
+  }
+
+  /** Channel mesh sampled straight from the trough primitive. */
+  private buildTrough(t: TroughSurface): void {
+    const P = new Vector3();
+    const T = new Vector3();
+    const K = new Vector3();
+    const up = new Vector3();
+    const right = new Vector3();
+    const Y = new Vector3(0, 1, 0);
+    const g = new ParametricGeometry(
+      (u, v, out) => {
+        t.path.frame(u, P, T, K);
+        up.copy(Y).addScaledVector(T, -Y.dot(T)).normalize();
+        right.crossVectors(T, up).normalize();
+        const phi = -t.phiMax + 2 * t.phiMax * v;
+        out.copy(P).addScaledVector(up, t.rho).addScaledVector(right, t.rho * Math.sin(phi)).addScaledVector(up, -t.rho * Math.cos(phi));
+      },
+      96,
+      16,
+    );
+    this.add(new Mesh(g, CONCAVE));
   }
 
   syncVisuals(alpha: number): void {

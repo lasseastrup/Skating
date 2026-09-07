@@ -9,7 +9,9 @@ import { GameRenderer } from './render/Renderer';
 import { MainScene } from './scenes/MainScene';
 import { PlaygroundScene } from './scenes/PlaygroundScene';
 import type { GameScene } from './scenes/SceneBase';
+import { buildPlaygroundPark, PLAYGROUND } from './sim/Playground';
 import { SkateWorld } from './sim/SkateWorld';
+import { TUNING } from './sim/Tuning';
 
 const SCENES: Record<string, () => GameScene> = {
   main: () => new MainScene(),
@@ -104,13 +106,14 @@ function boot(): void {
     simDt: SIM_DT,
     input,
     frame,
+    tuning: TUNING as Record<string, number>,
   };
   (window as unknown as { __coping: unknown }).__coping = hook;
 }
 
-/** Fresh world factory for determinism testing. Always the sim under test, never the display scene. */
+/** Fresh world factory for determinism testing: the full playground manifold, no display. */
 function makeWorld(): SimWorld {
-  return new SkateWorld();
+  return new SkateWorld(buildPlaygroundPark().builder.compound, PLAYGROUND.spawn);
 }
 
 boot();

@@ -1,6 +1,7 @@
 import { Scene, Vector3 } from 'three';
 import type { CameraTarget } from '../render/CameraRig';
 import { SkaterPlaceholder } from '../render/SkaterPlaceholder';
+import { buildFlatPark } from '../sim/Playground';
 import { SkateWorld } from '../sim/SkateWorld';
 import { buildGround, buildLighting, type GameScene } from './SceneBase';
 
@@ -10,7 +11,7 @@ const SUN_OFFSET = new Vector3(18, 30, 12);
 export class MainScene implements GameScene {
   readonly name = 'main';
   readonly three = new Scene();
-  readonly world = new SkateWorld();
+  readonly world = new SkateWorld(buildFlatPark().compound);
   private readonly skater: SkaterPlaceholder;
   private readonly sun;
   private readonly target: CameraTarget;

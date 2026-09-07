@@ -17,4 +17,4 @@ npm run build:single     # one-file dist/coping.html for hosting anywhere
 
 Scenes: `?scene=main` (the game) and `?scene=playground` (physics test bench).
 
-See `DEBUG.md` for the per-phase decision log. Currently at **Phase 1 — Rolling**.
+See `DEBUG.md` for the per-phase decision log. Currently at **Phase 2 — The Surface Manifold**.

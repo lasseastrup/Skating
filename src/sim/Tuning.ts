@@ -76,4 +76,40 @@ export const TUNING = {
 
   /** Speed at which the camera reaches its widest FOV and the controller its widest turns. */
   topSpeedRef: 14,
+
+  // --- Phase 2: manifold -------------------------------------------------------------------------
+  /** Max rotation of the surface frame per second. Safety clamp against torus corners flinging. */
+  frameMaxRate: 20,
+  /** Handoff hysteresis: a neighbour must be penetrated this deep before we switch onto it while
+   *  the current surface still claims us. Seam-exact primitives never need it; overlaps do. */
+  handoffPenetration: 0.05,
+  /** Tolerance on a primitive's bounds margin before it stops claiming the skater. */
+  boundsSlack: 0.01,
+  /** Normal-force slack (m/s²) before detaching. Keeps vert walls (N ≈ 0) attached. */
+  detachSlack: 0.6,
+  /** Air: landing accepted when height above surface is within this window. */
+  landMaxHeight: 0.09,
+  landMaxPenetration: 0.6,
+  /** Can't land on anything steeper than this (normal.y). Walls are entered from the ground. */
+  landMinNormalY: 0.15,
+  /** Fraction of lost normal velocity fed into the pelvis spring on landing. */
+  landPelvisKick: 0.18,
+
+  /** Curvature above this counts as "in a transition" for pumping. */
+  pumpCurvatureMin: 0.12,
+  /** Pump: accel = pumpEff · κ · factor (pumpEff in m²/s²). Work per pass = pumpEff·Δθ, a fixed
+   *  energy per pass, so speed gain shrinks as you get faster and friction can balance it. */
+  pumpEff: 9,
+  /** Curvature is capped here for pumping so a tight channel doesn't hand out free energy. */
+  pumpCurvatureCap: 0.45,
+  /** Pump fades to zero below this speed. */
+  pumpMinSpeed: 1.5,
+  pumpAutoFactor: 0.7,
+  pumpTimedFactor: 1.0,
+  /** Button press within this window of entering the transition earns the timed factor. */
+  pumpWindow: 0.15,
+  /** Pelvis compresses under centripetal load: metres per m/s² of κv². */
+  pelvisCurvatureCrouch: 0.012,
+  /** Pushing is only allowed where curvature is below this. */
+  pushMaxCurvature: 0.05,
 } as const;

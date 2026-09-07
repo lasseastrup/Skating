@@ -5,6 +5,121 @@ overlay (4-finger tap, backquote key, or `?debug=1`).
 
 ---
 
+## Phase 2 — The Surface Manifold ★
+
+**Status:** complete. All four acceptance cases pass in scripted runs. Determinism holds with the
+full playground manifold. Draw calls 13, tris 8.2k in the playground.
+
+### What was built
+
+| Area | File | Note |
+|---|---|---|
+| Surface contract | `src/sim/Surface.ts` | `project(p, out) → {point, normal, u, v, h, margin}` and `curvature(u, v, dir)` |
+| Plane | `src/sim/surfaces/Plane.ts` | Bounded, with holes. Ground, decks, vert extensions, ledge tops |
+| Cylinder section | `src/sim/surfaces/Cylinder.ts` | Quarter pipes, half-pipe transitions, bowl walls. Concave or convex |
+| Torus section | `src/sim/surfaces/Torus.ts` | Bowl corners. Two principal curvatures |
+| Spline extrusion | `src/sim/surfaces/Spline.ts`, `Trough.ts` | Catmull-Rom path, Newton closest-point, circular trough profile |
+| Bounds | `src/sim/surfaces/Bounds.ts` | Rect and annular-sector parametric bounds, used for edges and holes |
+| Compound | `src/sim/surfaces/Compound.ts` | Surfaces + declared adjacency + spatial hash of AABBs |
+| Park builder | `src/sim/Park.ts` | Quarter pipe / bowl corner / trough specs → surfaces with exact shared seams and ground holes |
+| Playground data | `src/sim/Playground.ts` | Shapes as numbers. Sim and visuals both build from it |
+| Controller | `src/sim/SkateWorld.ts` | Riding on the manifold, handoff, detach, air, landing, pumping |
+| Visuals | `src/scenes/PlaygroundScene.ts` | Ground grid with holes, half-pipe, trough mesh sampled from the primitive |
+
+The playground gained a **half-pipe** (two 2.4 m transitions, 5 m flat) for the pumping acceptance
+and an **S-channel** for the spline extrusion. The rail is still visual only until Phase 4.
+
+### Decisions
+
+**`margin` is the handoff signal, `h` is the contact signal.** Every projection reports a signed
+distance to the primitive's nearest parametric edge (positive inside) and a signed height above
+the surface. Grounded handoff: while the current surface's margin is ≥ −1 cm it keeps us, unless a
+neighbour is inside its bounds *and* we have sunk 5 cm into it (the hysteresis from the brief).
+Once past our edge, the neighbour with the largest margin takes over; if none claims us we are in
+the air. This makes seams exact when primitives are bounded exactly at the shared edge, which the
+park builder guarantees, and still tolerates overlaps.
+
+**Both rules also require |h| to be small.** A cylinder's angular range or a trough's φ range is
+"inside bounds" for points miles away radially, so without a height window a distant channel could
+claim the skater through the overlap rule. First run did exactly that.
+
+**Ground is one plane with holes.** Each ramp footprint and the channel strip are holes in the
+ground plane's bounds, so the ground never overlaps a transition and the flat→transition seam is a
+true shared edge with a matching normal. The visual ground is a 2 m grid with holed cells removed.
+
+**Lips are edges, not seams.** Vert extension → deck is a 90° corner. They are not declared
+adjacent. Riding up past the lip leaves the vert's bounds with nothing to hand off to: air. Rolling
+off the deck edge: air. Dropping in is therefore "fall a bit, land on the transition, keep the
+tangential velocity", which is what the drop-in test shows (0.39 s in the air, land at 7.8 u/s,
+roll out at 6.3). Phase 3 will make the body sell it; the physics is already right.
+
+**Detach is one inequality.** `N = κ·v² + g·n.y`. Attached while N ≥ −0.6 m/s² (the slack keeps
+vertical walls, where N is exactly 0, attached so you can roll up a vert, stop and roll back
+fakie). Launching off a lip and getting spat out past vertical both fall out of this.
+
+**Speed is a signed scalar; fakie is negative speed.** The frame keeps pointing where the nose
+points; coming back down a wall reverses the sign. Pushing is gated to speed ≥ −0.3 so it doesn't
+fight a fakie roll (first run: it did, and the half-pipe start was chaos).
+
+**Frame transport is projection plus a rate clamp.** New normal from the analytic projection,
+rotated toward at most 20 rad/s; tangent from the nose–tail probe chord re-orthogonalised. No
+80 ms low-pass any more: on analytic surfaces there is no probe jitter to filter, and a time
+constant that long lagged the normal by 20°+ in a 2.4 m transition at speed. The rate clamp is
+the anti-fling guard the brief asks for.
+
+**Pumping is constant energy per pass.** The brief says energy ∝ curvature × speed. Read as a
+power (energy per second) that gives acceleration `a = pumpEff·κ·factor`, independent of speed.
+Two other readings were tried and rejected by measurement: `a ∝ κ·v²` ran away to 44 u/s with no
+input; `a ∝ κ·v` still ran away because there is no friction in the air. With `a ∝ κ`, friction
+(∝ v) balances the pump and the half-pipe has a stable equilibrium. Timing: a pass begins when κ
+rises above 0.12/m; a press within 150 ms of that moment gives factor 1.0, otherwise 0.7.
+Curvature is capped at 0.45/m for pumping so a tight channel is not a free energy source.
+
+**Landing (Phase 2 version).** Accept a surface when the board centre is within [−0.6, +0.09] m of
+it, inside its bounds by the same 1 cm slack as grounded riding (a looser landing tolerance
+re-caught the lip edge and froze the skater there), moving into it, and not steeper than n.y ≥ 0.15.
+Tangential velocity survives, the normal part is absorbed into the pelvis spring. Frame snaps;
+Phase 3 blends it 120 ms early.
+
+### Measurements (scripted, 120 Hz, playground manifold)
+
+| Acceptance | Result |
+|---|---|
+| Flat → transition seam at 8 u/s | max normal change 1.67°/step vs 1.39°/step steady-state on the cylinder; up to 1.37 m, back down fakie |
+| Drop in from the QP deck at 1.5 u/s | 0.39 s air, land on transition at 7.8 u/s, roll out onto the flat at 6.3 |
+| Half-pipe from a standing start, timed pumps | above coping after **3 oscillations** (10.8 s) |
+| Half-pipe from a standing start, no button | above coping after 10.5 oscillations; equilibrium just at the lip |
+| Half-pipe, no input, from 9 u/s (speed floor) | settles 10.5–11.3 u/s, peaks 2.84 m (coping 2.7). Keeps oscillating forever |
+| Half-pipe, timed pumps, from 9 u/s | settles 13.5–14.5 u/s, peaks 2 m above coping |
+| Torus bowl corner, shallow entry at 7.9 u/s | exits at 9.0 u/s (+14%, auto-pump), heading turned 40°, max frame step 2.2° |
+| Lip launch at 14 u/s | peak 1.35 m above coping, lands in the transition, rolls out fakie at 8.9 |
+| S-channel, no input 20 s | bounded: max 9.3 u/s, 1.2 s airborne total, no NaN |
+
+Pump gain sweep (auto / timed equilibrium flat speed): 8 → 10.5 / 12.7; 12 → 13.4 / 17.2;
+16 → 16.5 / 21. Chose 9: auto sits at the coping, timing earns the air.
+
+### Known gaps, on purpose
+
+- **Landing pose.** Frame snaps on touchdown and the board stays level in the air. Phase 3.
+- **The bowl corner ends in air.** The quarter-torus has straight θ edges with nothing beyond them.
+  A real bowl continues into a wall; Phase 7's park will. Approach it from inside the corner.
+- **No collision with the sides of ramps or the rail.** Riding into a QP's extrusion cap passes
+  through it. Collision mercy is Phase 3+.
+- **Spline projection is Newton-refined, not closed-form.** Converges to ~1e-6 m in 4 iterations
+  from a 12-samples-per-segment table. Good enough to call exact.
+
+### Phone checklist for this phase
+
+1. Ride at the quarter pipe from the flat. The transition should feel like one surface, no bump.
+2. Ride up, stall, roll back fakie. The board should not spin round.
+3. Spawn faces the props; go left of the rail to the half-pipe (z ≈ −18). Do nothing: you should
+   keep oscillating at about coping height forever. Tap the button as you enter each transition:
+   you should start flying out above the coping.
+4. Roll off a deck. You fall, land in the transition, and roll out fast.
+5. Ride into the bowl corner from inside it at a shallow angle. It should carry you round.
+
+---
+
 ## Phase 1 — Rolling
 
 **Status:** complete on flat ground. Typecheck clean, determinism passes with the real controller,
