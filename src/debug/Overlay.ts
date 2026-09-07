@@ -40,6 +40,7 @@ export class DebugOverlay {
   private visible = false;
 
   private readonly kv = new Map<string, string | number>();
+  private readonly sceneButtons = new Map<string, HTMLButtonElement>();
   private frameAcc = 0;
   private frameMax = 0;
   private frameN = 0;
@@ -84,22 +85,25 @@ export class DebugOverlay {
 
     const bar = document.createElement('div');
     bar.style.cssText = 'margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;pointer-events:auto';
-    const btn = (label: string, fn: () => void) => {
+    const btn = (label: string, fn: () => void): HTMLButtonElement => {
       const b = document.createElement('button');
       b.textContent = label;
       b.style.cssText =
         'font:inherit;padding:6px 8px;background:#333;color:#eee;border:1px solid #555;border-radius:4px;touch-action:manipulation';
       b.addEventListener('click', fn);
       bar.appendChild(b);
+      return b;
     };
     btn('determinism', () => {
       this.resultEl.textContent = actions.runDeterminism();
     });
     btn('reset', () => actions.resetWorld());
     for (const s of scenes) {
-      if (s !== currentScene) btn(`→ ${s}`, () => actions.switchScene(s));
+      const b = btn(`${s}`, () => actions.switchScene(s));
+      this.sceneButtons.set(s, b);
     }
     root.appendChild(bar);
+    this.setScene(currentScene);
 
     this.resultEl = document.createElement('div');
     this.resultEl.style.cssText = 'margin-top:4px;white-space:pre;color:#fde68a';
@@ -111,6 +115,13 @@ export class DebugOverlay {
       'position:fixed;width:120px;height:120px;margin:-60px 0 0 -60px;border:2px solid rgba(255,255,255,.35);border-radius:50%;pointer-events:none;display:none;z-index:999';
     document.body.appendChild(this.stickRing);
     document.body.appendChild(root);
+  }
+
+  /** Highlight the active scene button. */
+  setScene(name: string): void {
+    for (const [s, b] of this.sceneButtons) {
+      b.style.background = s === name ? '#2563eb' : '#333';
+    }
   }
 
   get isVisible(): boolean {

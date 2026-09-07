@@ -21,7 +21,7 @@ function boot(): void {
 
   const canvas = document.getElementById('game') as HTMLCanvasElement;
   const gfx = new GameRenderer(canvas);
-  const scene = SCENES[sceneName]();
+  let scene = SCENES[sceneName]();
   const rig = new CameraRig(gfx.aspect);
   window.addEventListener('resize', () => rig.setAspect(gfx.aspect));
 
@@ -36,10 +36,12 @@ function boot(): void {
       },
       resetWorld: () => scene.world.reset(),
       switchScene: (name) => {
-        const u = new URL(location.href);
-        u.searchParams.set('scene', name);
-        u.searchParams.set('debug', '1');
-        location.href = u.toString();
+        const make = SCENES[name];
+        if (!make || name === scene.name) return;
+        scene.dispose();
+        scene = make();
+        overlay.setScene(name);
+        hook.scene = scene;
       },
     },
     Object.keys(SCENES),
@@ -84,7 +86,7 @@ function boot(): void {
   loop.start();
 
   // Test hook for automated checks. Not part of the game surface.
-  (window as unknown as { __coping: unknown }).__coping = {
+  const hook = {
     loop,
     overlay,
     scene,
@@ -92,6 +94,7 @@ function boot(): void {
     snapshot: () => overlay.snapshot(loop.stats),
     runDeterminism: (steps?: number, seed?: number) => runDeterminismTest(makeWorld, steps, seed),
   };
+  (window as unknown as { __coping: unknown }).__coping = hook;
 }
 
 /** Fresh world factory for determinism testing. Always the sim under test, never the display scene. */

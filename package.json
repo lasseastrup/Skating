@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite --host",
     "build": "tsc --noEmit && vite build",
+    "build:single": "npm run build && node scripts/inline-build.mjs",
     "preview": "vite preview --host",
     "typecheck": "tsc --noEmit",
     "check:perf": "node scripts/perf-check.mjs",
