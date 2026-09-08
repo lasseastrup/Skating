@@ -77,6 +77,38 @@ holds up against the outlines: the hull is the same skinned geometry, so it step
 | Shadow maps | 1 × 1024 | 1 × 1024 |
 | Determinism (2400 steps) | OK | |
 
+### Vert control (after the first island sessions)
+
+On a wall the controller behaved like a bead on a wire: the heading was a line on the surface, gravity
+only changed the signed speed along it, so an oblique run up a quarter pipe went up its line, stopped,
+and rolled back down the *same* line fakie, landing you where you started (0.6 m of travel along the
+wall from a 30° entry at 8 u/s). Steering on the wall had the flat's authority, so a carve was 40° at
+best, and riding off the end of a transition slammed into the ramp's own side cap. That is the "loss
+of control" on vert. What the reference games do, and what the controller now does:
+
+- **Steering authority grows with steepness** (Skate, Tony Hawk's). The yaw rate is multiplied by
+  up to 1.9× on a vertical wall. A carve around a bowl is a 180° in under a second in every skate
+  game; the flat's turn rate was never meant for it.
+- **A held stick is a carve** (Skate). Lateral gravity is allowed to bend the path downhill in
+  proportion to how hard the stick is held and how steep the wall is, so leaning into a wall swings
+  you around it instead of drawing a straight line up it. Head-on at 8 u/s, stick held on the wall:
+  the run now turns 125° on the wall and comes back down *forwards*; a 45° entry with the stick held
+  carves 5 m along the wall.
+- **A neutral stick going up fast aligns to straight up** (Tony Hawk's). Above the speed needed to
+  clear 1.5 m of wall, with no stick input, the heading eases toward straight up the wall at
+  1.6 rad/s so the air comes back down onto the ramp. Any stick input overrides it.
+- **Running out of speed on a wall is a kickturn** (every game, every skater). When the speed
+  along the wall passes through zero on a surface steeper than 57°, the board pivots 180° about the
+  normal in 0.15 s (toward the stick, or toward the downhill side) and rolls away forwards. Before,
+  the rider came down fakie, which then auto-reverted at the bottom: two silent flips the player
+  never asked for.
+- **A ramp's own side caps don't stop a rider on that ramp.** Walls carry an owner tag; a rider on
+  one of that feature's surfaces ignores them and rides off the side onto the ground instead of
+  slamming to a halt against an invisible wall.
+
+The loop tests still pass (plaza → snake → shallow end in 16 s with no bail, roller return with no
+pushing), determinism holds.
+
 ### Known gaps, on purpose
 
 - Haptics use `navigator.vibrate`, which iOS Safari does not implement; Android gets them.

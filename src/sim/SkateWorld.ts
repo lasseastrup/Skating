@@ -194,6 +194,11 @@ export class SkateWorld implements SimWorld {
    *  normal speed (m/s). The display layer diffs the counters; the sim never knows about juice. */
   pops = 0;
   trickLands = 0;
+  kickturns = 0;
+  /** Kickturn in progress: angle left to pivot (rad) and its direction about the normal. */
+  kickturnLeft = 0;
+  private kickturnDir = 1;
+  private kickturnCooldown = 0;
   lastImpact = 0;
   /** Grind contact point on the edge, world space (valid while grinding). */
   get grindPoint(): Vector3 {
@@ -290,6 +295,9 @@ export class SkateWorld implements SimWorld {
     this.slams = 0;
     this.pops = 0;
     this.trickLands = 0;
+    this.kickturns = 0;
+    this.kickturnLeft = 0;
+    this.kickturnCooldown = 0;
     this.lastImpact = 0;
     this.pushes = 0;
     this.grindPath = null;
@@ -472,9 +480,25 @@ export class SkateWorld implements SimWorld {
 
   // --- steering: heading follows the stick, velocity follows heading ---------------------------
   private stepSteering(input: InputFrame, dt: number): void {
+    if (this.kickturnLeft > 0) {
+      const d = Math.min(T.kickturnRate * dt, this.kickturnLeft);
+      this.kickturnLeft -= d;
+      this.yawRate = this.kickturnDir * T.kickturnRate;
+      this.q.setFromAxisAngle(this.normal, d * this.kickturnDir);
+      this.tangent.applyQuaternion(this.q).normalize();
+      this.binormal.crossVectors(this.tangent, this.normal).normalize();
+      if (this.kickturnLeft <= 0) {
+        this.speed = T.kickturnExitSpeed;
+        this.kickturnCooldown = 0.5;
+      }
+      return;
+    }
     const sp = Math.abs(this.speed);
     const authority = T.turnMinAuthority + (1 - T.turnMinAuthority) * Math.min(1, sp / T.turnAuthoritySpeed);
-    const rate = (T.turnRateBase / (1 + sp / T.turnSpeedRef)) * authority;
+    // Steepness 0 on the flat → 1 on a vertical wall. Transitions are where you turn the most in
+    // real skating (a carve around a bowl is a 180° in under a second), so authority grows here.
+    const steep = Math.min(1, Math.max(0, (0.75 - this.normal.y) / 0.5));
+    const rate = (T.turnRateBase / (1 + sp / T.turnSpeedRef)) * authority * (1 + T.wallTurnBoost * steep);
     this.yawRate = -input.stickX * rate;
     if (this.yawRate !== 0) {
       this.q.setFromAxisAngle(this.normal, this.yawRate * dt);
@@ -482,7 +506,33 @@ export class SkateWorld implements SimWorld {
       this.binormal.crossVectors(this.tangent, this.normal).normalize();
       this.speed *= Math.max(0, 1 - T.carveDrag * this.yawRate * this.yawRate * dt);
     }
-    this.gravityTurn(dt);
+    // Carve: a held stick on a wall lets gravity swing the path downhill as well.
+    this.gravityTurn(dt, Math.abs(input.stickX) * steep * T.carveGravity);
+    if (steep > 0.4 && Math.abs(input.stickX) < 0.1) this.vertAlign(dt, steep);
+  }
+
+  /**
+   * Tony Hawk's rule: going up a wall fast enough to air with a neutral stick, the heading is
+   * eased toward straight up the wall, so the air comes back down onto the ramp. A held stick
+   * overrides it (that's a carve), and slow riders are left alone (that's a kickturn coming).
+   */
+  private vertAlign(dt: number, steep: number): void {
+    const n = this.normal;
+    // Uphill direction in the tangent plane.
+    this.tmp.set(-n.x * n.y, 1 - n.y * n.y, -n.z * n.y);
+    if (this.tmp.lengthSq() < 1e-6) return;
+    this.tmp.normalize();
+    const dir = this.speed >= 0 ? 1 : -1;
+    // Only while climbing with enough speed to clear the lip (heading up, speed above ~1.5 m of rise).
+    if (this.tangent.dot(this.tmp) * dir < 0.3 || this.speed * this.speed < 2 * T.gravity * 1.5) return;
+    this.tmp.multiplyScalar(dir);
+    const cross = this.tmp.dot(this.binormal); // positive: uphill lies toward +binormal
+    const ang = Math.atan2(cross, this.tangent.dot(this.tmp));
+    const step = Math.max(-T.vertAlignRate * steep * dt, Math.min(T.vertAlignRate * steep * dt, ang));
+    if (Math.abs(step) < 1e-5) return;
+    this.q.setFromAxisAngle(this.normal, -step);
+    this.tangent.applyQuaternion(this.q).normalize();
+    this.binormal.crossVectors(this.tangent, this.normal).normalize();
   }
 
   /**
@@ -491,10 +541,10 @@ export class SkateWorld implements SimWorld {
    * lateral part of gravity is allowed to swing the velocity downhill, so a skater can never
    * park on a wall. Full strength at zero normal force, nothing above `gravityTurnForce`.
    */
-  private gravityTurn(dt: number): void {
+  private gravityTurn(dt: number, extraWeight = 0): void {
     const sp = Math.abs(this.speed);
     if (sp < 0.5) return;
-    const w = 1 - Math.min(1, Math.max(0, this.normalForce / T.gravityTurnForce));
+    const w = Math.max(extraWeight, 1 - Math.min(1, Math.max(0, this.normalForce / T.gravityTurnForce)));
     if (w <= 0) return;
     // Downhill in the tangent plane, projected on the binormal: lateral gravity per unit mass.
     const lateral = -T.gravity * this.binormal.y * w;
@@ -507,9 +557,23 @@ export class SkateWorld implements SimWorld {
 
   // --- energy: gravity, weight shift, friction, pump ------------------------------------------
   private stepEnergy(input: InputFrame, dt: number): void {
+    const before = this.speed;
     this.speed += -T.gravity * this.tangent.y * dt;
     this.speed += input.stickY * T.weightShiftAccel * dt;
     this.speed -= this.speed * T.rollFriction * dt;
+    // Kickturn: run out of speed while climbing a steep wall and the board pivots 180° to come
+    // back down forwards, the way every skater and every Tony Hawk's game does it, instead of
+    // rolling back down the same line fakie.
+    if (this.kickturnCooldown > 0) this.kickturnCooldown -= dt;
+    if (this.kickturnLeft > 0) {
+      // Pivoting on the wall: the board is parked at the apex until the nose points back down.
+      this.speed = 0;
+    } else if (this.kickturnCooldown <= 0 && this.normal.y < T.kickturnMaxNormalY && before * this.speed <= 0 && before !== 0 && this.tangent.y * Math.sign(before) > 0.2) {
+      this.kickturnLeft = Math.PI;
+      this.kickturnDir = input.stickX > 0.1 ? -1 : input.stickX < -0.1 ? 1 : this.binormal.y > 0 ? 1 : -1;
+      this.speed = 0;
+      this.kickturns++;
+    }
     if (this.normal.y > 0.99 && Math.abs(this.speed) < T.restSpeed) this.speed = 0;
 
     const k = this.curvature;
@@ -576,6 +640,8 @@ export class SkateWorld implements SimWorld {
     const n = c.queryWalls(this.pos, this.wallCand);
     for (let i = 0; i < n; i++) {
       const w = c.walls[this.wallCand[i]];
+      // A feature's own side caps don't stop a rider on its surfaces: you ride off the side.
+      if (w.owner && this.current >= 0 && c.surfaces[this.current].id.startsWith(w.owner)) continue;
       const t = crossesWall(this.prevPos, this.pos, w);
       if (t < 0) continue;
       const height = w.yTop - (this.prevPos.y - T.rideHeight);
@@ -647,7 +713,9 @@ export class SkateWorld implements SimWorld {
     this.probePoint(-T.probeReach, this.pTail);
     this.tmp.subVectors(this.pNose, this.pTail);
     this.tmp.addScaledVector(this.normal, -this.tmp.dot(this.normal));
-    if (this.tmp.lengthSq() > 1e-8) this.tangent.copy(this.tmp).normalize();
+    // While pivoting on the spot the probes would drag the heading back (a probe that falls off
+    // the surface's edge is clamped to it), so the pivoted tangent is kept and only re-planed.
+    if (this.tmp.lengthSq() > 1e-8 && this.kickturnLeft <= 0) this.tangent.copy(this.tmp).normalize();
     else this.tangent.addScaledVector(this.normal, -this.tangent.dot(this.normal)).normalize();
     this.binormal.crossVectors(this.tangent, this.normal).normalize();
 
@@ -693,6 +761,7 @@ export class SkateWorld implements SimWorld {
 
   /** Leave the surface. `withCoyote` when it wasn't a pop, so a late release still pops. */
   private toAir(withCoyote: boolean): void {
+    this.kickturnLeft = 0;
     this.lastGroundNormal.copy(this.normal);
     this.state = SkateState.Air;
     this.current = -1;
@@ -1352,7 +1421,7 @@ export class SkateWorld implements SimWorld {
     kv('landings', `${this.landings}  bails ${this.bails}  last mis ${this.lastMisalignDeg.toFixed(0)}°`);
     kv('grind', this.grindPath ? `${this.grindName}  ${this.grindPath.id}  yaw ${(this.grindYaw / D).toFixed(0)}° pitch ${(this.grindPitch / D).toFixed(0)}°${this.prevButton ? '  lock' : ''}` : `—  (${this.grinds}, ${this.grindDistance.toFixed(0)} m)`);
     kv('manual', `${this.manual.toFixed(2)}  bailRamp ${this.bailRamp.toFixed(2)}`);
-    kv('walls', `mercy ${this.mercies}  slams ${this.slams}`);
+    kv('walls', `mercy ${this.mercies}  slams ${this.slams}  kickturns ${this.kickturns}`);
     kv('curv', `${this.curvature.toFixed(3)} /m  N ${this.normalForce.toFixed(1)}`);
     kv('pump', this.inTransition ? `${this.pumpFactor.toFixed(1)} (${this.transitions})` : `— (${this.transitions})`);
     kv('yawRate', `${this.yawRate.toFixed(2)} rad/s`);

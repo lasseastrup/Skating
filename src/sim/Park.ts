@@ -210,10 +210,10 @@ export class ParkBuilder {
       const xToe = s.wallX + f * r;
       const xBack = s.wallX - f * s.deckDepth;
       for (const z of [zc - hw, zc + hw]) {
-        this.compound.addWall({ ax: xToe, az: z, bx: xBack, bz: z, yBottom: 0, yTop: deckY, kind: 'wall' });
+        this.compound.addWall({ ax: xToe, az: z, bx: xBack, bz: z, yBottom: 0, yTop: deckY, kind: 'wall', owner: `${name}.` });
       }
       // Back of the deck is a wall too (from the far side).
-      this.compound.addWall({ ax: xBack, az: zc - hw, bx: xBack, bz: zc + hw, yBottom: 0, yTop: deckY, kind: 'wall' });
+      this.compound.addWall({ ax: xBack, az: zc - hw, bx: xBack, bz: zc + hw, yBottom: 0, yTop: deckY, kind: 'wall', owner: `${name}.` });
     }
     // Footprint hole: from the deck's back edge to the transition toe.
     const xa = f > 0 ? s.wallX - s.deckDepth : s.wallX - r;

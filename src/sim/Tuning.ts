@@ -25,6 +25,17 @@ export const TUNING = {
    *  downhill; full effect at zero normal force. Max heading rate from it, rad/s. */
   gravityTurnForce: 11,
   gravityTurnMaxRate: 6,
+  /** Transitions: steering authority grows on steep surfaces (×(1 + boost) at vertical), a held
+   *  stick lets lateral gravity bend the path downhill (a carve), a neutral stick going up fast
+   *  enough to air is aligned toward straight-up-the-wall (rad/s), and running out of speed on a
+   *  steep wall kickturns (180° about the normal) instead of rolling back down fakie. */
+  wallTurnBoost: 0.9,
+  carveGravity: 0.9,
+  vertAlignRate: 1.6,
+  kickturnMaxNormalY: 0.55,
+  /** Kickturn pivot rate, rad/s (180° in ~0.15 s), and the roll-away speed it hands back. */
+  kickturnRate: 21,
+  kickturnExitSpeed: 0.4,
   /** Yaw rate at full stick and zero speed. */
   turnRateBase: 3.0,
   /** Yaw rate halves at this speed: rate = base / (1 + speed / ref). Sharp when slow, wide arcs when fast. */

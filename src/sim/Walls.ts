@@ -13,6 +13,8 @@ export interface WallSeg {
   yTop: number;
   /** 'stairs' faces are steeper to clear (you land on the platform) but otherwise the same. */
   kind: 'wall' | 'stairs';
+  /** Feature name prefix; a rider on one of that feature's surfaces ignores this wall. */
+  owner?: string;
 }
 
 /**
