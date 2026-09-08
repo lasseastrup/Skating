@@ -1,4 +1,5 @@
 import { makeInputFrame, TouchInput } from './core/Input';
+import { StickHud } from './ui/StickHud';
 import { Loop } from './core/Loop';
 import type { SimWorld } from './core/Sim';
 import { SIM_DT } from './core/Time';
@@ -71,6 +72,7 @@ function boot(): void {
 
   const input = new TouchInput(canvas, () => overlay.toggle());
   const frame = makeInputFrame();
+  const hud = new StickHud(document.body, canvas);
 
   const loop = new Loop({
     simStep(dt) {
@@ -82,6 +84,7 @@ function boot(): void {
       scene.syncVisuals(alpha, dt);
       rig.update(scene.cameraTarget(), dt);
       gfx.render(scene.three, rig.camera);
+      hud.update(frame, input.stickOrigin, input.isButtonDown);
 
       if (overlay.isVisible) {
         scene.world.debugReport(overlay.set);
