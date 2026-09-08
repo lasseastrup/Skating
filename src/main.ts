@@ -1,5 +1,6 @@
 import { makeInputFrame, TouchInput } from './core/Input';
 import { StickHud } from './ui/StickHud';
+import { Juice } from './render/Juice';
 import { Loop } from './core/Loop';
 import type { SimWorld } from './core/Sim';
 import { SIM_DT } from './core/Time';
@@ -56,6 +57,7 @@ function boot(): void {
         if (!make || name === scene.name) return;
         scene.dispose();
         scene = make();
+        juice.attach(scene.three, scene.world as SkateWorld);
         scene.syncVisuals(1, 1 / 60);
         rig.snap(scene.cameraTarget());
         overlay.setScene(name);
@@ -74,6 +76,7 @@ function boot(): void {
   const frame = makeInputFrame();
   const hud = new StickHud(document.body, canvas);
 
+  let juice: Juice;
   const loop = new Loop({
     simStep(dt) {
       input.sample(frame);
@@ -82,7 +85,9 @@ function boot(): void {
     render(alpha, stats) {
       const dt = Math.min(stats.frameMs, 100) / 1000;
       scene.syncVisuals(alpha, dt);
-      rig.update(scene.cameraTarget(), dt);
+      const target = scene.cameraTarget();
+      rig.update(target, dt);
+      juice.update(scene.world as SkateWorld, target, rig, dt, gfx.aspect, window.innerHeight);
       gfx.render(scene.three, rig.camera);
       hud.update(frame, input.stickOrigin, input.isButtonDown);
 
@@ -104,6 +109,8 @@ function boot(): void {
     else loop.start();
   });
 
+  juice = new Juice(loop);
+  juice.attach(scene.three, scene.world as SkateWorld);
   loop.start();
 
   // Test hook for automated checks. Not part of the game surface.

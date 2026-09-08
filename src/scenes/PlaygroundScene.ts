@@ -3,10 +3,8 @@ import {
   BufferAttribute,
   BufferGeometry,
   CylinderGeometry,
-  DoubleSide,
   ExtrudeGeometry,
   Mesh,
-  MeshLambertMaterial,
   Scene,
   Shape,
   Vector3,
@@ -20,10 +18,9 @@ import { buildPlaygroundPark, PLAYGROUND } from '../sim/Playground';
 import { SkateWorld } from '../sim/SkateWorld';
 import type { PlaneSurface } from '../sim/surfaces/Plane';
 import type { TroughSurface } from '../sim/surfaces/Trough';
-import { buildLighting, DARK_PROP, GREY_GROUND, GREY_PROP, type GameScene } from './SceneBase';
+import { buildLighting, SUN_OFFSET, type GameScene } from './SceneBase';
+import { levelMesh, LEVEL_MAT, paintFlat, PALETTE } from '../render/Toon';
 
-const SUN_OFFSET = new Vector3(18, 30, 12);
-const CONCAVE = new MeshLambertMaterial({ color: 0x8a8a8a, side: DoubleSide });
 
 /**
  * The physics test bench. Surfaces come from `buildPlaygroundPark()`; the meshes here are fitted
@@ -97,7 +94,7 @@ export class PlaygroundScene implements GameScene {
     g.setAttribute('position', new BufferAttribute(new Float32Array(positions), 3));
     g.setIndex(index);
     g.computeVertexNormals();
-    this.add(new Mesh(g, GREY_GROUND));
+    this.add(new Mesh(paintFlat(g, PALETTE.concrete), LEVEL_MAT));
   }
 
   private buildQuarterPipe(s: QuarterPipeSpec): void {
@@ -114,7 +111,7 @@ export class PlaygroundScene implements GameScene {
     sh.closePath();
     const g = new ExtrudeGeometry(sh, { depth: width, bevelEnabled: false, curveSegments: 24 });
     g.translate(0, 0, -width / 2);
-    const m = this.add(new Mesh(g, GREY_PROP));
+    const m = this.add(levelMesh(g, 'prop'));
     m.position.set(s.wallX, 0, s.zCenter);
   }
 
@@ -122,19 +119,19 @@ export class PlaygroundScene implements GameScene {
     const { length, height, radius, pos } = PLAYGROUND.rail;
     const bar = new CylinderGeometry(radius, radius, length, 10, 1);
     bar.rotateX(Math.PI / 2);
-    const m = this.add(new Mesh(bar, DARK_PROP));
+    const m = this.add(levelMesh(bar, 'steel'));
     m.castShadow = true;
     m.position.copy(pos).y = height;
     const post = new CylinderGeometry(radius * 0.8, radius * 0.8, height, 8, 1);
     for (const z of [-length * 0.4, length * 0.4]) {
-      const p = this.add(new Mesh(post, DARK_PROP));
+      const p = this.add(levelMesh(post, 'steel'));
       p.position.set(pos.x, height / 2, pos.z + z);
     }
   }
 
   private buildLedge(): void {
     const l = PLAYGROUND.ledge;
-    const m = this.add(new Mesh(new BoxGeometry(l.length, l.height, l.width), GREY_PROP));
+    const m = this.add(levelMesh(new BoxGeometry(l.length, l.height, l.width), 'prop'));
     m.castShadow = true;
     m.position.set(l.x, l.height / 2, l.z);
   }
@@ -160,7 +157,7 @@ export class PlaygroundScene implements GameScene {
       32,
       16,
     );
-    this.add(new Mesh(surf, CONCAVE)).position.copy(pos);
+    this.add(levelMesh(surf, 'concave')).position.copy(pos);
     const lip = new ParametricGeometry(
       (u, v, out) => {
         const th = s.th0 + u * span;
@@ -169,7 +166,7 @@ export class PlaygroundScene implements GameScene {
       32,
       1,
     );
-    this.add(new Mesh(lip, CONCAVE)).position.copy(pos);
+    this.add(levelMesh(lip, 'concave')).position.copy(pos);
     const deck = new ParametricGeometry(
       (u, v, out) => {
         const th = s.th0 + u * span;
@@ -179,7 +176,7 @@ export class PlaygroundScene implements GameScene {
       32,
       1,
     );
-    this.add(new Mesh(deck, CONCAVE)).position.copy(pos);
+    this.add(levelMesh(deck, 'concave')).position.copy(pos);
   }
 
   /** Channel mesh sampled straight from the trough primitive. */
@@ -201,7 +198,7 @@ export class PlaygroundScene implements GameScene {
       96,
       16,
     );
-    this.add(new Mesh(g, CONCAVE));
+    this.add(levelMesh(g, 'concave'));
   }
 
   syncVisuals(alpha: number, dt: number): void {

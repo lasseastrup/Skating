@@ -190,6 +190,15 @@ export class SkateWorld implements SimWorld {
   private readonly prevPos = new Vector3();
   mercies = 0;
   slams = 0;
+  /** Juice hooks: pops so far, tricks (not plain ollies) landed, and the last landing's absorbed
+   *  normal speed (m/s). The display layer diffs the counters; the sim never knows about juice. */
+  pops = 0;
+  trickLands = 0;
+  lastImpact = 0;
+  /** Grind contact point on the edge, world space (valid while grinding). */
+  get grindPoint(): Vector3 {
+    return this.gP;
+  }
   /** Test hook: the "no pushing" loop acceptance. */
   debugNoPush = false;
   pushes = 0;
@@ -279,6 +288,9 @@ export class SkateWorld implements SimWorld {
     this.grindName = '50-50';
     this.mercies = 0;
     this.slams = 0;
+    this.pops = 0;
+    this.trickLands = 0;
+    this.lastImpact = 0;
     this.pushes = 0;
     this.grindPath = null;
     this.grindT = 0;
@@ -580,6 +592,7 @@ export class SkateWorld implements SimWorld {
         this.vel.copy(this.tangent).multiplyScalar(this.speed).addScaledVector(this.normal, vPop);
         this.pitch = T.popPitch;
         this.pelvisV += T.pelvisPopKick;
+    this.pops++;
         this.armTrick();
         return true;
       }
@@ -731,6 +744,7 @@ export class SkateWorld implements SimWorld {
       this.landingPredicted = false;
       this.headingAssisting = false;
       this.pelvisV += T.pelvisPopKick;
+    this.pops++;
       this.armTrick();
     }
   }
@@ -744,6 +758,7 @@ export class SkateWorld implements SimWorld {
     this.pitch = T.popPitch;
     this.coyote = 0;
     this.pelvisV += T.pelvisPopKick;
+    this.pops++;
     this.armTrick();
   }
 
@@ -961,6 +976,8 @@ export class SkateWorld implements SimWorld {
 
     this.current = r.surface;
     this.landings++;
+    this.lastImpact = Math.abs(vn);
+    if (this.trickName !== 'ollie' && this.airTime > 0.3) this.trickLands++;
     this.impactTimer = T.impactTime;
     this.caughtL = true;
     this.caughtR = true;

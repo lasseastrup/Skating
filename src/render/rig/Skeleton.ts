@@ -1,5 +1,6 @@
 import {
   Bone,
+  Color,
   BufferGeometry,
   Float32BufferAttribute,
   Quaternion,
@@ -11,6 +12,7 @@ import {
 } from 'three';
 import { quatFromDirFront } from './IK';
 import { BONES, RIG, type BoneDef, type BoneName } from './RigSpec';
+import { PALETTE } from '../Toon';
 
 /**
  * Builds the skeleton and a procedural one-piece skinned mesh in the bind pose. Every bone gets
@@ -70,7 +72,13 @@ export class SkaterSkeleton {
     const positions: number[] = [];
     const skinIndex: number[] = [];
     const skinWeight: number[] = [];
+    const colors: number[] = [];
     const index: number[] = [];
+    const col = new Color();
+    const pushColor = (hex: number) => {
+      col.setHex(hex);
+      colors.push(col.r, col.g, col.b);
+    };
     const RADIAL = 8;
     const PROFILE: [number, number][] = [
       [0, 0.35],
@@ -87,6 +95,16 @@ export class SkaterSkeleton {
     const c = new Vector3();
 
     const boneIndex = (name: BoneName) => boneList.findIndex((b) => b.name === name);
+
+    // Clothes are painted per bone: shirt over the torso and short sleeves, trousers on the
+    // legs, shoes on the feet, skin elsewhere, a cap on top of the head.
+    const colorFor = (name: BoneName, s: number): number => {
+      if (name === 'pelvis' || name.startsWith('upperLeg') || name.startsWith('lowerLeg')) return PALETTE.pants;
+      if (name.startsWith('foot')) return PALETTE.shoe;
+      if (name.startsWith('spine') || name === 'chest' || name.startsWith('clav')) return PALETTE.shirt;
+      if (name.startsWith('upperArm')) return s < 0.4 ? PALETTE.shirt : PALETTE.skin;
+      return PALETTE.skin;
+    };
 
     for (const def of BONES) {
       if (def.radius <= 0) continue;
@@ -106,6 +124,7 @@ export class SkaterSkeleton {
       // Bottom pole
       positions.push(p0.x, p0.y, p0.z);
       pushWeights(skinIndex, skinWeight, bi, blendParent, blendParent >= 0 ? 0.5 : 0);
+      pushColor(colorFor(def.name, 0));
       for (let ri = 0; ri < PROFILE.length; ri++) {
         const [s, rr] = PROFILE[ri];
         c.copy(p0).addScaledVector(axis, s * def.length);
@@ -115,6 +134,7 @@ export class SkaterSkeleton {
           const a = (k / RADIAL) * Math.PI * 2;
           positions.push(c.x + (u.x * Math.cos(a) + v.x * Math.sin(a)) * r, c.y + (u.y * Math.cos(a) + v.y * Math.sin(a)) * r, c.z + (u.z * Math.cos(a) + v.z * Math.sin(a)) * r);
           pushWeights(skinIndex, skinWeight, bi, blendParent, wParent);
+          pushColor(colorFor(def.name, s));
         }
       }
       // Top pole
@@ -122,6 +142,7 @@ export class SkaterSkeleton {
       const topPole = positions.length / 3;
       positions.push(c.x, c.y, c.z);
       pushWeights(skinIndex, skinWeight, bi, -1, 0);
+      pushColor(colorFor(def.name, 1));
       // Faces
       for (let k = 0; k < RADIAL; k++) {
         const k1 = (k + 1) % RADIAL;
@@ -147,6 +168,8 @@ export class SkaterSkeleton {
           const th = (k / SEG) * Math.PI * 2;
           positions.push(centre.x + R * Math.sin(phi) * Math.cos(th) * 0.95, centre.y - R * Math.cos(phi), centre.z + R * Math.sin(phi) * Math.sin(th));
           pushWeights(skinIndex, skinWeight, hi, -1, 0);
+          // Cap: the top of the head, pulled a little further down at the back (+X is the face).
+          pushColor(phi > Math.PI * (0.58 - 0.08 * Math.cos(th)) ? PALETTE.cap : PALETTE.skin);
         }
       }
       for (let i = 0; i < RINGS; i++) {
@@ -162,6 +185,7 @@ export class SkaterSkeleton {
     geo.setAttribute('position', new Float32BufferAttribute(positions, 3));
     geo.setAttribute('skinIndex', new Uint16BufferAttribute(skinIndex, 4));
     geo.setAttribute('skinWeight', new Float32BufferAttribute(skinWeight, 4));
+    geo.setAttribute('color', new Float32BufferAttribute(colors, 3));
     geo.setIndex(index);
     geo.computeVertexNormals();
     return geo;

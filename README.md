@@ -17,4 +17,4 @@ npm run build:single     # one-file dist/coping.html for hosting anywhere
 
 Scenes: `?scene=main` (the park, default) and `?scene=playground` (physics test bench).
 
-See `DEBUG.md` for the per-phase decision log. Currently at **Phase 7 — The Island: One Loopable Park**.
+See `DEBUG.md` for the per-phase decision log. Currently at **Phase 8 — Toon-Cel Render & Juice**.

@@ -1,35 +1,36 @@
 import {
   BoxGeometry,
+  Color,
   BufferAttribute,
   BufferGeometry,
   CylinderGeometry,
-  DoubleSide,
   ExtrudeGeometry,
   Mesh,
-  MeshLambertMaterial,
   Shape,
   ShapeGeometry,
   Vector3,
-  type Material,
 } from 'three';
 import { ParametricGeometry } from 'three/addons/geometries/ParametricGeometry.js';
 import type { BowlRoomSpec, KickerSpec, LedgeSpec, PlatformSpec, QuarterPipeSpec, RollerSpec } from '../sim/Park';
 import type { PlaneSurface } from '../sim/surfaces/Plane';
 import type { TroughSurface } from '../sim/surfaces/Trough';
-import { DARK_PROP, GREY_GROUND, GREY_PROP } from './SceneBase';
+import { levelMesh, LEVEL_MAT, PALETTE } from '../render/Toon';
 
-export const CONCAVE = new MeshLambertMaterial({ color: 0x8a8a8a, side: DoubleSide });
-const STAIR = new MeshLambertMaterial({ color: 0x7d7d7d });
 
 /** The picture is fitted to the primitive: every mesh here reads the same spec the sim used. */
 
 export function groundGridMesh(ground: PlaneSurface, half: number, cell = 2): Mesh {
   const n = Math.ceil((2 * half) / cell);
   const positions: number[] = [];
+  const colors: number[] = [];
   const index: number[] = [];
   let vi = 0;
+  const cA = new Color(PALETTE.concrete), cB = new Color(PALETTE.concreteAlt);
   const emit = (u0: number, v0: number, size: number) => {
     positions.push(u0, 0, -v0, u0 + size, 0, -v0, u0 + size, 0, -(v0 + size), u0, 0, -(v0 + size));
+    // Alternate slab tone per 2 m cell: motion reads against the ground even with no props near.
+    const c = (Math.floor((u0 + 0.01) / cell) + Math.floor((v0 + 0.01) / cell)) % 2 === 0 ? cA : cB;
+    for (let k = 0; k < 4; k++) colors.push(c.r, c.g, c.b);
     index.push(vi, vi + 1, vi + 2, vi, vi + 2, vi + 3);
     vi += 4;
   };
@@ -61,14 +62,15 @@ export function groundGridMesh(ground: PlaneSurface, half: number, cell = 2): Me
   }
   const g = new BufferGeometry();
   g.setAttribute('position', new BufferAttribute(new Float32Array(positions), 3));
+  g.setAttribute('color', new BufferAttribute(new Float32Array(colors), 3));
   g.setIndex(index);
   g.computeVertexNormals();
-  const m = new Mesh(g, GREY_GROUND);
+  const m = new Mesh(g, LEVEL_MAT);
   m.receiveShadow = true;
   return m;
 }
 
-export function quarterPipeMesh(s: QuarterPipeSpec, mat: Material = GREY_PROP): Mesh[] {
+export function quarterPipeMesh(s: QuarterPipeSpec): Mesh[] {
   const { radius: r, width, vertExt, deckDepth, facing: f } = s;
   const sh = new Shape();
   sh.moveTo(-f * deckDepth, 0);
@@ -80,13 +82,13 @@ export function quarterPipeMesh(s: QuarterPipeSpec, mat: Material = GREY_PROP): 
   sh.closePath();
   const g = new ExtrudeGeometry(sh, { depth: width, bevelEnabled: false, curveSegments: 24 });
   g.translate(0, 0, -width / 2);
-  const m = new Mesh(g, mat);
+  const m = levelMesh(g, 'concave');
   m.position.set(s.wallX, 0, s.zCenter);
   m.receiveShadow = true;
   const out: Mesh[] = [m];
   if (s.extension) {
     const e = s.extension;
-    const ext = new Mesh(new BoxGeometry(deckDepth, e.height, e.z1 - e.z0), mat);
+    const ext = levelMesh(new BoxGeometry(deckDepth, e.height, e.z1 - e.z0), 'concave');
     ext.position.set(s.wallX - (f * deckDepth) / 2, r + vertExt + e.height / 2, (e.z0 + e.z1) / 2);
     ext.receiveShadow = true;
     out.push(ext);
@@ -94,8 +96,8 @@ export function quarterPipeMesh(s: QuarterPipeSpec, mat: Material = GREY_PROP): 
   return out;
 }
 
-export function boxMesh(s: LedgeSpec, mat: Material = GREY_PROP): Mesh {
-  const m = new Mesh(new BoxGeometry(s.length, s.height, s.width), mat);
+export function boxMesh(s: LedgeSpec): Mesh {
+  const m = levelMesh(new BoxGeometry(s.length, s.height, s.width), 'concave');
   m.position.set(s.x, s.height / 2, s.z);
   m.castShadow = true;
   m.receiveShadow = true;
@@ -132,7 +134,7 @@ export function kickerMesh(s: KickerSpec): Mesh {
     }
     g.computeVertexNormals();
   }
-  const m = new Mesh(g, GREY_PROP);
+  const m = levelMesh(g, 'prop');
   m.position.set(s.toeX, 0, s.zCenter);
   m.receiveShadow = true;
   m.castShadow = true;
@@ -164,7 +166,7 @@ export function rollerMesh(s: RollerSpec): Mesh {
   sh.closePath();
   const g = new ExtrudeGeometry(sh, { depth: s.width, bevelEnabled: false });
   g.translate(0, 0, -s.width / 2);
-  const m = new Mesh(g, GREY_PROP);
+  const m = levelMesh(g, 'prop');
   m.position.set(s.xCenter, 0, s.zCenter);
   m.receiveShadow = true;
   return m;
@@ -172,7 +174,7 @@ export function rollerMesh(s: RollerSpec): Mesh {
 
 export function platformMeshes(s: PlatformSpec): Mesh[] {
   const out: Mesh[] = [];
-  const body = new Mesh(new BoxGeometry(s.length, s.height, s.width), GREY_PROP);
+  const body = levelMesh(new BoxGeometry(s.length, s.height, s.width), 'prop');
   body.position.set(s.x, s.height / 2, s.z);
   body.castShadow = true;
   body.receiveShadow = true;
@@ -184,7 +186,7 @@ export function platformMeshes(s: PlatformSpec): Mesh[] {
     const h = s.height * (1 - (i + 1) / steps);
     if (h <= 0.01) continue;
     const run = s.stairRun / steps;
-    const st = new Mesh(new BoxGeometry(run, h, s.width), STAIR);
+    const st = levelMesh(new BoxGeometry(run, h, s.width), 'prop');
     st.position.set(x1 + run * (i + 0.5), h / 2, s.z);
     st.receiveShadow = true;
     out.push(st);
@@ -192,14 +194,14 @@ export function platformMeshes(s: PlatformSpec): Mesh[] {
   // Hubba: a sloped box along the +z side.
   const hz = s.z + s.width / 2 + s.hubbaWidth / 2;
   const len = Math.hypot(s.stairRun, s.height - s.hubbaEndHeight);
-  const hub = new Mesh(new BoxGeometry(len, 0.3, s.hubbaWidth), GREY_PROP);
+  const hub = levelMesh(new BoxGeometry(len, 0.3, s.hubbaWidth), 'prop');
   hub.position.set(x1 + s.stairRun / 2, (s.height + s.hubbaEndHeight) / 2 - 0.15, hz);
   hub.rotation.z = -Math.atan2(s.height - s.hubbaEndHeight, s.stairRun);
   hub.castShadow = true;
   hub.receiveShadow = true;
   out.push(hub);
   // Hubba support down to the ground.
-  const sup = new Mesh(new BoxGeometry(s.stairRun, s.hubbaEndHeight, s.hubbaWidth), GREY_PROP);
+  const sup = levelMesh(new BoxGeometry(s.stairRun, s.hubbaEndHeight, s.hubbaWidth), 'prop');
   sup.position.set(x1 + s.stairRun / 2, s.hubbaEndHeight / 2 - 0.05, hz);
   out.push(sup);
   return out;
@@ -230,12 +232,12 @@ export function bowlRoomMeshes(s: BowlRoomSpec): Mesh[] {
       16,
       10,
     );
-    out.push(new Mesh(surf, CONCAVE));
+    out.push(levelMesh(surf, 'concave'));
     const lip = new ParametricGeometry((u, v, o) => {
       const th = th0 + u * span;
       o.set(cx + R * Math.cos(th), floorY + r + v * s.vertExt, cz + R * Math.sin(th));
     }, 16, 1);
-    out.push(new Mesh(lip, CONCAVE));
+    out.push(levelMesh(lip, 'concave'));
   }
   const sides: { key: keyof BowlRoomSpec['open']; d: Vector3; len: number; center: Vector3 }[] = [
     { key: 'east', d: new Vector3(1, 0, 0), len: 2 * s.hz, center: new Vector3(s.x + s.hx + Rc, 0, s.z) },
@@ -258,13 +260,13 @@ export function bowlRoomMeshes(s: BowlRoomSpec): Mesh[] {
       8,
       12,
     );
-    out.push(new Mesh(g, CONCAVE));
+    out.push(levelMesh(g, 'concave'));
     const vg = new ParametricGeometry((u, v, o) => {
       const t = (u - 0.5) * side.len;
       o.copy(C).addScaledVector(along, t).addScaledVector(side.d, r);
       o.y = floorY + r + v * s.vertExt;
     }, 2, 1);
-    out.push(new Mesh(vg, CONCAVE));
+    out.push(levelMesh(vg, 'concave'));
   }
   // Floor: rounded rectangle shape, flat.
   const sh = new Shape();
@@ -283,7 +285,7 @@ export function bowlRoomMeshes(s: BowlRoomSpec): Mesh[] {
   fg.rotateX(-Math.PI / 2); // shape (x, y) → (x, 0, -y)
   fg.scale(1, 1, -1); // flip z so shape-y maps to +z
   fg.computeVertexNormals();
-  const floor = new Mesh(fg, CONCAVE);
+  const floor = levelMesh(fg, 'concave');
   floor.position.set(s.x, floorY, s.z);
   floor.receiveShadow = true;
   out.push(floor);
@@ -297,7 +299,7 @@ export function bankMesh(x0: number, y0: number, x1: number, y1: number, z0: num
   g.setAttribute('position', new BufferAttribute(new Float32Array([x0, y0, z0, x1, y1, z0, x1, y1, z1, x0, y0, z1]), 3));
   g.setIndex([0, 2, 1, 0, 3, 2]);
   g.computeVertexNormals();
-  const m = new Mesh(g, CONCAVE);
+  const m = levelMesh(g, 'concave');
   m.receiveShadow = true;
   return m;
 }
@@ -308,7 +310,7 @@ export function sideFaceMesh(x0: number, y0: number, x1: number, y1: number, z: 
   g.setAttribute('position', new BufferAttribute(new Float32Array([x0, y0, z, x1, y1, z, x1, 0, z, x0, 0, z]), 3));
   g.setIndex([0, 1, 2, 0, 2, 3]);
   g.computeVertexNormals();
-  const m = new Mesh(g, CONCAVE);
+  const m = levelMesh(g, 'concave');
   m.receiveShadow = true;
   return m;
 }
@@ -348,7 +350,7 @@ export function troughCapMesh(t: TroughSurface, chuteZ0: number, chuteZ1: number
   // Shape (z, y) → world (x0, y, z): rotate so shape-x lies along +Z.
   g.rotateY(-Math.PI / 2);
   g.computeVertexNormals();
-  const m = new Mesh(g, CONCAVE);
+  const m = levelMesh(g, 'concave');
   m.position.x = P.x;
   m.receiveShadow = true;
   return m;
@@ -367,7 +369,7 @@ export function troughMesh(t: TroughSurface): Mesh {
     96,
     16,
   );
-  const m = new Mesh(g, CONCAVE);
+  const m = levelMesh(g, 'concave');
   m.receiveShadow = true;
   return m;
 }
@@ -375,13 +377,13 @@ export function troughMesh(t: TroughSurface): Mesh {
 export function railMesh(a: Vector3, b: Vector3, radius: number): Mesh[] {
   const len = a.distanceTo(b);
   const bar = new CylinderGeometry(radius, radius, len, 10, 1);
-  const m = new Mesh(bar, DARK_PROP);
+  const m = levelMesh(bar, 'steel');
   m.position.copy(a).lerp(b, 0.5);
   m.quaternion.setFromUnitVectors(new Vector3(0, 1, 0), b.clone().sub(a).normalize());
   m.castShadow = true;
   const out = [m];
   for (const p of [a.clone().lerp(b, 0.15), a.clone().lerp(b, 0.85)]) {
-    const post = new Mesh(new CylinderGeometry(radius * 0.8, radius * 0.8, p.y, 8, 1), DARK_PROP);
+    const post = levelMesh(new CylinderGeometry(radius * 0.8, radius * 0.8, p.y, 8, 1), 'steel');
     post.position.set(p.x, p.y / 2, p.z);
     out.push(post);
   }

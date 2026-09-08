@@ -57,7 +57,7 @@ export const TUNING = {
 
   /** Pelvis height above deck standing, and how far a full crouch drops it. */
   pelvisStand: 0.92,
-  pelvisCrouch: 0.34,
+  pelvisCrouch: 0.4,
   /** Extra compression per u/s of speed. Fast riders sit lower. */
   pelvisSpeedCrouch: 0.006,
   /** Pelvis spring: natural frequency and damping ratio. ζ 0.7 leaves a little overshoot on purpose. */
@@ -97,7 +97,7 @@ export const TUNING = {
   /** Can't land on anything steeper than this (normal.y). Walls are entered from the ground. */
   landMinNormalY: 0.15,
   /** Fraction of lost normal velocity fed into the pelvis spring on landing. */
-  landPelvisKick: 0.18,
+  landPelvisKick: 0.26,
 
   /** Curvature above this counts as "in a transition" for pumping. */
   pumpCurvatureMin: 0.12,
@@ -131,7 +131,7 @@ export const TUNING = {
   /** Board pitch decays with this time constant in the air (the ollie levels out). */
   pitchDecayTau: 0.12,
   /** Upward pelvis velocity kick at pop. */
-  pelvisPopKick: 3.2,
+  pelvisPopKick: 4.2,
   /** Coyote time: a release this soon after leaving a lip still pops. */
   coyoteTime: 0.1,
   /** Trick rotations complete in this fraction of the predicted air time, never faster than minTrickTime. */

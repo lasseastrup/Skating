@@ -116,6 +116,11 @@ export class CameraRig {
     this.camera.updateProjectionMatrix();
   }
 
+  /** Landing impact: drop the camera a little; the height spring brings it back. */
+  kick(amount: number): void {
+    this.posVel.y -= amount;
+  }
+
   /** Snap to the target with no spring history (spawn, reset, scene switch). */
   snap(t: CameraTarget): void {
     this.yaw = this.travelYaw(t, Math.atan2(-t.forward.x, -t.forward.z));

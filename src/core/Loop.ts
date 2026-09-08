@@ -38,6 +38,21 @@ export class Loop {
   private lastTime = -1;
   private rafId = 0;
   private running = false;
+  /** Juice: sim time scale (dilation) and a frozen-frame hitch, both in wall seconds. */
+  private timeScale = 1;
+  private dilateLeft = 0;
+  private hitchLeft = 0;
+
+  /** Freeze the sim for `seconds` of wall time (the frame hitch on a hard landing). */
+  hitch(seconds: number): void {
+    this.hitchLeft = Math.max(this.hitchLeft, seconds);
+  }
+
+  /** Run the sim at `scale` × real time for `seconds` of wall time. */
+  dilate(scale: number, seconds: number): void {
+    this.timeScale = scale;
+    this.dilateLeft = seconds;
+  }
 
   constructor(private readonly hooks: LoopHooks) {}
 
@@ -63,6 +78,14 @@ export class Loop {
     this.lastTime = now;
     s.frameMs = dt * 1000;
     if (dt > MAX_FRAME_DT) dt = MAX_FRAME_DT;
+    if (this.hitchLeft > 0) {
+      this.hitchLeft -= dt;
+      dt = 0;
+    } else if (this.dilateLeft > 0) {
+      this.dilateLeft -= dt;
+      dt *= this.timeScale;
+      if (this.dilateLeft <= 0) this.timeScale = 1;
+    }
     this.accumulator += dt;
 
     // --- simulate ---

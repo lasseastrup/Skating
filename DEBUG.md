@@ -5,6 +5,95 @@ overlay (4-finger tap, backquote key, or `?debug=1`).
 
 ---
 
+## Phase 8 — Toon-Cel Render & Juice
+
+**Status:** complete. Three toon materials with a three-band gradient map and a rim term, colour
+and ambient occlusion baked into vertex colours, inverted-hull outlines on the skater and the board,
+a gradient sky with four clouds and a low sun for long shadows, and the whole juice ladder: landing
+hitch and trick time dilation, speed lines, grind sparks with a ribbon trail, wheel dust, a blob
+shadow, camera kick, haptics. A hair tail on the cap for secondary motion. 38 draw calls, 28k
+triangles, 11 materials, determinism holds.
+
+### What was built
+
+| Area | File | Note |
+|---|---|---|
+| Toon materials | `src/render/Toon.ts` | `MeshToonMaterial` + 3-band `DataTexture` gradient; rim band injected via `onBeforeCompile`; `LEVEL_MAT` (double-sided), `SKATER_MAT`, `BOARD_MAT`, all vertex-coloured |
+| Baked colour/AO | `src/render/Toon.ts` | `paint(geo, kind)`: concave surfaces darken toward their crease, props get a contact-shadow band, steel and wood flat; `paintFlat` |
+| Outlines | `src/render/Toon.ts` | `outlineMaterial(width)`: back-face hull pushed along the normal before skinning; `addOutline` shares geometry and skeleton |
+| Sky | `src/render/Toon.ts` | Inverted gradient sphere, four sprite clouds on one canvas texture |
+| Lighting | `src/scenes/SceneBase.ts` | Sun at 24° elevation, warm; sky/ground hemisphere fill; fog to the horizon colour |
+| Skater paint | `src/render/rig/Skeleton.ts` | Per-bone vertex colours: shirt with short sleeves, trousers, shoes, skin, cap |
+| Hair | `src/render/rig/SkaterRig.ts` | Two Verlet particles off the back of the cap, a 30-triangle tail rewritten per pose solve |
+| Juice | `src/render/Juice.ts` | Speed lines (full-screen quad), 192-particle pool for sparks and dust, grind ribbon, blob shadow, camera kick, haptics; diffs sim counters, never writes the sim |
+| Loop | `src/core/Loop.ts` | `hitch(s)` freezes sim time, `dilate(scale, s)` scales it; both in wall seconds |
+| Sim hooks | `src/sim/SkateWorld.ts` | `pops`, `trickLands`, `lastImpact`, `grindPoint` |
+
+### Decisions
+
+**Three lit materials, colour in the vertices.** Every level mesh shares one double-sided toon
+material; the ground's alternating 2 m slabs, the dark creases at the bottom of transitions and
+the contact band at the foot of ledges are all vertex colours baked when the mesh is built. The
+skater is painted per bone (a cap, a shirt with short sleeves, trousers, shoes), the board per part.
+Twelve was the material budget; the scene runs eleven including outlines, sky, clouds and effects.
+
+**Rim as a band, not a glow.** The rim term is a hard `smoothstep` on the fresnel so it reads as
+a cel highlight along the silhouette rather than a soft bloom; strength 0.5 on the skater, 0.3 on
+the board, 0.12 on the level so concrete stays matte.
+
+**Outlines on the hero only.** Inverted hulls: the same geometry drawn back-faced with vertices
+pushed 14 mm (body) / 6 mm (board) along their normals, before the skinning chunk so the hull
+follows the bones for free. Two draw calls. The level gets its creases from vertex colour, per the
+brief; no edge-detect pass.
+
+**Juice reads counters, never state.** The director diffs `landings`, `trickLands`, `pops`,
+`bails` each frame and reads `lastImpact` (absorbed normal speed) to grade the landing: above 4.5
+m/s is a hard landing (60 ms hitch, camera kick, a dozen dust puffs, a 30 ms buzz); above 2 m/s a
+soft one. A landed trick (anything but a plain ollie, 0.3 s+ of air) dilates time to 0.85× for
+200 ms. The hitch and dilation live in the loop as wall-time modifiers of the accumulator, so the
+sim still steps at exactly 120 Hz and determinism is untouched.
+
+**Sparks and dust are one Points draw.** A 192-slot ring pool with per-particle kind: sparks are
+small, bright, gravity-heavy and short-lived; dust is large, grows, drifts and fades. Sparks come
+off the grind contact point three per frame with the ribbon behind them; dust comes off the rear
+wheels on hard carves (yaw rate above 0.9 rad/s) and bursts on landings and bails.
+
+**Blob shadow is honest.** On the ground it sits on the ride surface under the board, oriented to
+the surface normal. In the air it projects to the floor probe under the skater, shrinking and
+fading with height, so you can read where you will land.
+
+**Readability pushes.** Pelvis crouch range 0.34 → 0.40, pop kick 3.2 → 4.2, landing absorb
+0.18 → 0.26, so squash and stretch read at thumbnail size; arm arcs widened (air 0.38 → 0.5 out,
+0.12 → 0.2 up; riding 0.14 → 0.2 out; balance swing 0.25 → 0.35). The 12 fps stepped sampling
+holds up against the outlines: the hull is the same skinned geometry, so it steps with the pose.
+
+### Measurements (island, SwiftShader, 390×844)
+
+| Metric | Value | Budget |
+|---|---|---|
+| Draw calls | 38 | ≤ 80 |
+| Triangles | 28.3k | ≤ 120k |
+| Materials | 11 | ≤ 12 |
+| Shadow maps | 1 × 1024 | 1 × 1024 |
+| Determinism (2400 steps) | OK | |
+
+### Known gaps, on purpose
+
+- Haptics use `navigator.vibrate`, which iOS Safari does not implement; Android gets them.
+- The chest-high rim on the level is nearly invisible by design; creases carry the level's form.
+- The hair is one tail. Clothes have no separate jiggle: the shirt is the torso mesh.
+- Clouds are static billboards; the sky does not change with time of day.
+
+### Phone checklist for this phase
+
+1. Stand still and look: the still should read as a shipped game. Skater outlined, cap, hair tail.
+2. Push to top speed: speed lines fade in past 70%. Carve hard: dust off the rear wheels.
+3. Ollie off the kicker and land flat: the frame hitches once, the camera dips.
+4. Grind the plaza ledge: sparks and an orange ribbon off the edge; phone buzzes if Android.
+5. Drop into the bowl: the blob shadow follows you down the wall.
+
+---
+
 ## Phase 7 — The Island: One Loopable Park
 
 **Status:** complete. The main scene is now the island: plaza, mini-ramp with spine, kicker, a walled

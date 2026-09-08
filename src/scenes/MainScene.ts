@@ -6,9 +6,8 @@ import { buildIslandPark, ISLAND } from '../sim/ParkLayout';
 import { SkateWorld } from '../sim/SkateWorld';
 import type { PlaneSurface } from '../sim/surfaces/Plane';
 import { bowlRoomMeshes, boxMesh, groundGridMesh, kickerMesh, platformMeshes, quarterPipeMesh, rollerMesh, sunkenBankMeshes, troughCapMesh, troughMesh } from './FeatureMeshes';
-import { buildLighting, type GameScene } from './SceneBase';
+import { buildLighting, SUN_OFFSET, type GameScene } from './SceneBase';
 
-const SUN_OFFSET = new Vector3(18, 30, 12);
 
 /** The game: one continuous, loopable island. Surfaces from `buildIslandPark()`, meshes fitted here. */
 export class MainScene implements GameScene {

@@ -1,9 +1,11 @@
 import {
   BoxGeometry,
+  BufferAttribute,
+  BufferGeometry,
   CylinderGeometry,
+  DynamicDrawUsage,
   Group,
   Mesh,
-  MeshLambertMaterial,
   Quaternion,
   Vector3,
 } from 'three';
@@ -12,14 +14,14 @@ import { AnimState, SkateState, type SkateWorld } from '../../sim/SkateWorld';
 import { TUNING as T } from '../../sim/Tuning';
 import { quatFromDirFront, solveTwoBone } from './IK';
 import { RIG } from './RigSpec';
+import { addOutline, BOARD_MAT, outlineMaterial, paintFlat, PALETTE, SKATER_MAT } from '../Toon';
 import { SkaterSkeleton } from './Skeleton';
 import { Particle } from './Verlet';
 import { grindStyle, makePose, manualPose, sampleTrickPose, scalePose, smoothstep, zeroPose } from './Poses';
 
-const BODY_MAT = new MeshLambertMaterial({ color: 0xc8c8c8 });
-const DECK_MAT = new MeshLambertMaterial({ color: 0x3a3a3a });
-const TRUCK_MAT = new MeshLambertMaterial({ color: 0x9a9a9a });
-const WHEEL_MAT = new MeshLambertMaterial({ color: 0xe0e0e0 });
+/** Hero outlines: inverted hulls, one width for the body, a finer one for the board. */
+const OUTLINE_BODY = outlineMaterial(0.014);
+const OUTLINE_BOARD = outlineMaterial(0.006);
 
 const X = new Vector3(1, 0, 0);
 const Y = new Vector3(0, 1, 0);
@@ -68,6 +70,14 @@ export class SkaterRig {
   private readonly chest = new Particle();
   private readonly handL = new Particle();
   private readonly handR = new Particle();
+  /** Two-bone hair (a short tail out of the cap): the cheapest secondary motion there is. */
+  private readonly hair1 = new Particle();
+  private readonly hair2 = new Particle();
+  private readonly hairAnchor = new Vector3();
+  private readonly hairMesh: Mesh;
+  private readonly hairPos: Float32Array;
+  /** Body frame in world: the pose is solved in it, the hair mesh lives in it. */
+  private readonly bodyFrame = new Group();
   private primed = false;
 
   // Scratch.
@@ -105,31 +115,56 @@ export class SkaterRig {
   private readonly boneQ = new Map<string, Quaternion>();
 
   constructor(private readonly world: SkateWorld) {
-    this.skeleton = new SkaterSkeleton(BODY_MAT);
+    this.skeleton = new SkaterSkeleton(SKATER_MAT);
     this.group.add(this.skeleton.mesh);
+    addOutline(this.skeleton.mesh, OUTLINE_BODY);
     for (const name of Object.keys(this.skeleton.bones)) this.boneQ.set(name, new Quaternion());
 
     // Board: deck, two trucks, four wheels. Separate children so Layer 5 can move them.
-    this.deck = new Mesh(new BoxGeometry(0.21, 0.018, 0.82), DECK_MAT);
+    this.deck = new Mesh(paintFlat(new BoxGeometry(0.21, 0.018, 0.82), PALETTE.deck), BOARD_MAT);
     this.deck.castShadow = true;
     this.board.add(this.deck);
-    const truckGeo = new BoxGeometry(0.16, 0.035, 0.05);
-    this.trucks = [new Mesh(truckGeo, TRUCK_MAT), new Mesh(truckGeo, TRUCK_MAT)];
+    addOutline(this.deck, OUTLINE_BOARD);
+    const truckGeo = paintFlat(new BoxGeometry(0.16, 0.035, 0.05), PALETTE.truck);
+    this.trucks = [new Mesh(truckGeo, BOARD_MAT), new Mesh(truckGeo, BOARD_MAT)];
     this.trucks[0].position.set(0, -0.03, -0.3);
     this.trucks[1].position.set(0, -0.03, 0.3);
     for (const t of this.trucks) this.board.add(t);
     const wheelGeo = new CylinderGeometry(WHEEL_RADIUS, WHEEL_RADIUS, 0.035, 10, 1);
     wheelGeo.rotateZ(Math.PI / 2);
+    paintFlat(wheelGeo, PALETTE.wheel);
     for (const z of [-0.3, 0.3]) {
       for (const x of [-0.11, 0.11]) {
-        const w = new Mesh(wheelGeo, WHEEL_MAT);
+        const w = new Mesh(wheelGeo, BOARD_MAT);
         w.position.set(x, -0.05, z);
         this.board.add(w);
         this.wheels.push(w);
       }
     }
     this.group.add(this.board);
-    this.triangles = this.skeleton.triangles + 12 + 24 + 4 * 40;
+    this.group.add(this.bodyFrame);
+    // Hair tail: three rings of six around anchor → hair1 → hair2, positions rewritten per solve.
+    const SIDES = 6;
+    const hg = new BufferGeometry();
+    this.hairPos = new Float32Array(3 * SIDES * 3 + 3);
+    hg.setAttribute('position', new BufferAttribute(this.hairPos, 3).setUsage(DynamicDrawUsage));
+    const hidx: number[] = [];
+    for (let r = 0; r < 2; r++) {
+      for (let k = 0; k < SIDES; k++) {
+        const k1 = (k + 1) % SIDES;
+        const a = r * SIDES + k, b = r * SIDES + k1, c = (r + 1) * SIDES + k, d = (r + 1) * SIDES + k1;
+        hidx.push(a, c, b, b, c, d);
+      }
+    }
+    const tip = 3 * SIDES;
+    for (let k = 0; k < SIDES; k++) hidx.push(2 * SIDES + k, tip, 2 * SIDES + ((k + 1) % SIDES));
+    hg.setIndex(hidx);
+    paintFlat(hg, PALETTE.hair);
+    this.hairMesh = new Mesh(hg, SKATER_MAT);
+    this.hairMesh.frustumCulled = false;
+    this.hairMesh.castShadow = true;
+    this.bodyFrame.add(this.hairMesh);
+    this.triangles = this.skeleton.triangles + 12 + 24 + 4 * 40 + 30;
   }
 
   /** Per display frame. `dt` is render dt in seconds. */
@@ -155,6 +190,8 @@ export class SkaterRig {
     this.q.slerpQuaternions(fb.prev.rot, fb.curr.rot, alpha);
     root.position.copy(this.pelvisLocal).applyQuaternion(this.q).add(this.tmp);
     root.quaternion.copy(this.q).multiply(this.pelvisLocalQ);
+    this.bodyFrame.position.copy(this.tmp);
+    this.bodyFrame.quaternion.copy(this.q);
   }
 
   // --- Layer 5: the board ----------------------------------------------------------------------
@@ -369,11 +406,11 @@ export class SkaterRig {
         // Hands go forward to break the fall; the ramp then hands them to gravity.
         this.target.addScaledVector(this.chestSide, side * 0.3).addScaledVector(this.chestFront, 0.45).addScaledVector(this.chestUp, -0.1);
       } else if (inAir) {
-        this.target.addScaledVector(this.chestSide, side * 0.38).addScaledVector(this.chestUp, 0.12).addScaledVector(this.chestFront, 0.05);
+        this.target.addScaledVector(this.chestSide, side * 0.5).addScaledVector(this.chestUp, 0.2).addScaledVector(this.chestFront, 0.05);
       } else {
-        this.target.addScaledVector(this.chestUp, -0.3).addScaledVector(this.chestFront, 0.1).addScaledVector(this.chestSide, side * 0.14);
+        this.target.addScaledVector(this.chestUp, -0.3).addScaledVector(this.chestFront, 0.1).addScaledVector(this.chestSide, side * 0.2);
         this.target.addScaledVector(this.chestFront, -0.18 * w.charge); // wind-up
-        this.target.addScaledVector(X, -0.25 * lean).addScaledVector(Y, 0.2 * Math.abs(lean)); // balance
+        this.target.addScaledVector(X, -0.35 * lean).addScaledVector(Y, 0.3 * Math.abs(lean)); // balance
         if (grinding) this.target.addScaledVector(this.chestSide, side * 0.15).addScaledVector(this.chestUp, 0.15);
       }
       const ho = i === 0 ? pose.hL : pose.hR;
@@ -418,6 +455,20 @@ export class SkaterRig {
     }
     this.lookDir.lerp(this.target, Math.min(1, dt * 8)).normalize();
     this.headTop.copy(this.neckTop).addScaledVector(this.chestUp, RIG.head);
+
+    // Hair: anchored at the back of the cap, hangs off two Verlet particles, jiggles with the run.
+    this.hairAnchor.copy(this.neckTop).addScaledVector(this.chestUp, RIG.head * 0.62).addScaledVector(this.chestFront, -RIG.headRadius * 0.92);
+    this.target.copy(this.hairAnchor).addScaledVector(this.chestFront, -0.07).addScaledVector(this.chestUp, -0.05);
+    if (!this.primed) {
+      this.hair1.reset(this.target);
+      this.hair2.reset(this.target);
+    }
+    this.verlet(this.hair1, this.target, dt, 0.5);
+    this.hair1.constrainDistance(this.hairAnchor, 0.075);
+    this.target.copy(this.hair1.pos).addScaledVector(this.chestFront, -0.05).addScaledVector(this.chestUp, -0.06);
+    this.verlet(this.hair2, this.target, dt, 0.4);
+    this.hair2.constrainDistance(this.hair1.pos, 0.075);
+    this.writeHair();
     this.aim('head', this.neckTop, this.headTop, this.lookDir);
   }
 
@@ -457,6 +508,41 @@ export class SkaterRig {
       const pq = def.parent === 'pelvis' ? this.pelvisLocalQ : this.boneQ.get(def.parent)!;
       bone.quaternion.copy(pq).invert().multiply(q);
     }
+  }
+
+  private writeHair(): void {
+    const SIDES = 6;
+    const rings: [Vector3, number][] = [
+      [this.hairAnchor, 0.034],
+      [this.hair1.pos, 0.026],
+      [this.hair2.pos, 0.014],
+    ];
+    const P = this.hairPos;
+    for (let r = 0; r < 3; r++) {
+      const [c, rad] = rings[r];
+      const nxt = r < 2 ? rings[r + 1][0] : c;
+      const prv = r > 0 ? rings[r - 1][0] : c;
+      this.aimDir.subVectors(nxt, prv);
+      if (this.aimDir.lengthSq() < 1e-8) this.aimDir.copy(this.chestUp).negate();
+      this.aimDir.normalize();
+      // Perpendicular frame around the segment direction.
+      this.tmp.copy(this.chestSide).addScaledVector(this.aimDir, -this.chestSide.dot(this.aimDir)).normalize();
+      this.pole.crossVectors(this.aimDir, this.tmp);
+      for (let k = 0; k < SIDES; k++) {
+        const a = (k / SIDES) * Math.PI * 2;
+        const o = (r * SIDES + k) * 3;
+        P[o] = c.x + (this.tmp.x * Math.cos(a) + this.pole.x * Math.sin(a)) * rad;
+        P[o + 1] = c.y + (this.tmp.y * Math.cos(a) + this.pole.y * Math.sin(a)) * rad;
+        P[o + 2] = c.z + (this.tmp.z * Math.cos(a) + this.pole.z * Math.sin(a)) * rad;
+      }
+    }
+    const t = 3 * SIDES * 3;
+    this.tmp.copy(this.hair2.pos).addScaledVector(this.aimDir, 0.03);
+    P[t] = this.tmp.x;
+    P[t + 1] = this.tmp.y;
+    P[t + 2] = this.tmp.z;
+    (this.hairMesh.geometry.getAttribute('position') as BufferAttribute).needsUpdate = true;
+    this.hairMesh.geometry.computeVertexNormals();
   }
 
   dispose(): void {
