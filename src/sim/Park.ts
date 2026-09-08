@@ -400,14 +400,21 @@ export class ParkBuilder {
       new Vector3(0, 0, -1),
       new RectBounds(-s.length / 2, s.length / 2, -s.width / 2, s.width / 2),
     );
-    this.compound.add(top);
+    const topIdx = this.compound.add(top);
     const x0 = s.x - s.length / 2, x1 = s.x + s.length / 2, z0 = s.z - s.width / 2, z1 = s.z + s.width / 2;
     this.compound.addWall({ ax: x0, az: z0, bx: x1, bz: z0, yBottom: 0, yTop: s.height, kind: 'wall' });
     this.compound.addWall({ ax: x0, az: z1, bx: x0, bz: z0, yBottom: 0, yTop: s.height, kind: 'wall' });
     this.compound.addWall({ ax: x1, az: z1, bx: x0, bz: z1, yBottom: 0, yTop: s.height, kind: 'wall' });
-    // Stairs: one 'stairs' wall at the platform edge (steps are visual), footprint hole beneath.
-    this.compound.addWall({ ax: x1, az: z0, bx: x1, bz: z1, yBottom: 0, yTop: s.height, kind: 'stairs' });
+    // Stairs: physically a bank from the platform edge down to the ground (the steps are visual).
+    // Rolling off the top lands you on it; rolling into it from below is a 27° climb you either
+    // make with speed or roll back down. No hole to fall through either way.
     const stairEnd = x1 + s.stairRun;
+    const Us = new Vector3(s.stairRun, -s.height, 0).normalize();
+    const stairs = new PlaneSurface(`${name}.stairs`, new Vector3(x1, s.height, s.z), Us, new Vector3(0, 0, -1), new RectBounds(0, Math.hypot(s.stairRun, s.height), -s.width / 2, s.width / 2));
+    if (stairs.normal.y < 0) throw new Error('stairs normal flipped');
+    const stairsIdx = this.compound.add(stairs);
+    this.compound.connect(topIdx, stairsIdx);
+    this.groundLinks.push(stairsIdx);
     this.groundHoles.push(new RectBounds(x0, stairEnd, -z1, -z0));
     // Hubba: a sloped ledge along the +z side of the stairs, top rideable, both edges grindable.
     const hz0 = z1, hz1 = z1 + s.hubbaWidth;

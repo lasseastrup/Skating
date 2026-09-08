@@ -13,6 +13,7 @@ import {
 } from 'three';
 import { ParametricGeometry } from 'three/addons/geometries/ParametricGeometry.js';
 import type { CameraTarget } from '../render/CameraRig';
+import { fillCameraTarget } from './SceneBase';
 import { SkaterRig } from '../render/rig/SkaterRig';
 import type { QuarterPipeSpec } from '../sim/Park';
 import { buildPlaygroundPark, PLAYGROUND } from '../sim/Playground';
@@ -47,7 +48,7 @@ export class PlaygroundScene implements GameScene {
 
     this.skater = new SkaterRig(this.world);
     this.three.add(this.skater.group);
-    this.target = { pos: this.skater.board.position, forward: this.world.tangent, up: this.world.normal, speed: 0, lean: 0 };
+    this.target = { pos: this.skater.board.position, forward: this.world.tangent, up: this.world.normal, vel: new Vector3(), speed: 0, lean: 0, mode: 'ride', floorY: 0, floorAt: (p) => this.world.compound.floorHeightAt(p) };
 
     const P = PLAYGROUND;
     this.buildQuarterPipe(P.quarterPipe);
@@ -210,8 +211,7 @@ export class PlaygroundScene implements GameScene {
   }
 
   cameraTarget(): CameraTarget {
-    this.target.speed = this.world.speed;
-    this.target.lean = this.world.lean;
+    fillCameraTarget(this.target, this.world);
     return this.target;
   }
 

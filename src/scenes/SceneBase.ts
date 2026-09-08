@@ -11,6 +11,8 @@ import {
 } from 'three';
 import type { SimWorld } from '../core/Sim';
 import type { CameraTarget } from '../render/CameraRig';
+import { SkateState, type SkateWorld } from '../sim/SkateWorld';
+import { TUNING as T } from '../sim/Tuning';
 
 /** Shared palette. Grey on grey, per Phase 0: no art yet. */
 export const GREY_GROUND = new MeshLambertMaterial({ color: 0x6e6e6e });
@@ -63,4 +65,21 @@ export function buildGround(scene: Scene, size: number): Mesh {
   m.receiveShadow = true;
   scene.add(m);
   return m;
+}
+
+/** Fill the per-frame camera target fields from the sim: travel velocity, mode and floor reference. */
+export function fillCameraTarget(t: CameraTarget, w: SkateWorld): void {
+  t.speed = w.speed;
+  t.lean = w.lean;
+  if (w.state === SkateState.Air || w.state === SkateState.Pop) {
+    t.vel.copy(w.vel);
+    t.mode = 'air';
+  } else {
+    t.vel.copy(w.tangent).multiplyScalar(w.speed);
+    t.mode = w.state === SkateState.Grinding ? 'grind' : w.state === SkateState.Bailed ? 'bail' : 'ride';
+    // Reference floor: the last roughly level ground the skater stood on. Walls and steep
+    // transitions do not count, so the camera stays at the bottom of a ramp and pitches up
+    // instead of climbing the wall with the skater.
+    if (w.normal.y > 0.8) t.floorY = w.pos.y - T.rideHeight;
+  }
 }

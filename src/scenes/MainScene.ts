@@ -1,5 +1,6 @@
 import { Fog, Scene, Vector3, type Mesh } from 'three';
 import type { CameraTarget } from '../render/CameraRig';
+import { fillCameraTarget } from './SceneBase';
 import { SkaterRig } from '../render/rig/SkaterRig';
 import { buildIslandPark, ISLAND } from '../sim/ParkLayout';
 import { SkateWorld } from '../sim/SkateWorld';
@@ -50,7 +51,7 @@ export class MainScene implements GameScene {
 
     this.skater = new SkaterRig(this.world);
     this.three.add(this.skater.group);
-    this.target = { pos: this.skater.board.position, forward: this.world.tangent, up: this.world.normal, speed: 0, lean: 0 };
+    this.target = { pos: this.skater.board.position, forward: this.world.tangent, up: this.world.normal, vel: new Vector3(), speed: 0, lean: 0, mode: 'ride', floorY: 0, floorAt: (p) => this.world.compound.floorHeightAt(p) };
   }
 
   syncVisuals(alpha: number, dt: number): void {
@@ -60,8 +61,7 @@ export class MainScene implements GameScene {
   }
 
   cameraTarget(): CameraTarget {
-    this.target.speed = this.world.speed;
-    this.target.lean = this.world.lean;
+    fillCameraTarget(this.target, this.world);
     return this.target;
   }
 

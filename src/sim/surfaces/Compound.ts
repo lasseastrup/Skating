@@ -155,6 +155,28 @@ export class Compound {
     return n;
   }
 
+  private readonly camCand = new Int32Array(32);
+  private readonly camResult = new ProjectResult(new Vector3(), new Vector3());
+
+  /**
+   * Highest rideable surface at or around p's column, for the camera: the concrete a camera must
+   * stay above. Considers surfaces that face up (normal.y > 0.35), whose bounded footprint holds p
+   * (margin ≥ -0.05) and whose point lies within [p.y - below, p.y + above]. Null when none.
+   */
+  floorHeightAt(p: Vector3, below = 6, above = 2.5): number | null {
+    const n = this.query(p, this.camCand);
+    let best: number | null = null;
+    for (let i = 0; i < n; i++) {
+      const r = this.camResult;
+      this.surfaces[this.camCand[i]].project(p, r);
+      if (r.normal.y < 0.35 || r.margin < -0.05) continue;
+      const y = r.point.y;
+      if (y < p.y - below || y > p.y + above) continue;
+      if (best === null || y > best) best = y;
+    }
+    return best;
+  }
+
   /** Project p onto surface `idx` into result slot `slot`. */
   project(idx: number, p: Vector3, slot: number): ProjectResult {
     const r = this.results[slot];

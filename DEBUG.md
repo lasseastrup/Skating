@@ -99,6 +99,42 @@ present since Phase 5 and independent of frame rate; the fix is that constraints
 same delta (a constraint is a displacement, never a velocity), plus a guard that resets a particle that
 has blown up. `constrainRange` (hands) got the same treatment.
 
+### Camera rework (after the first island sessions)
+
+The Phase 1 rig sprang the camera's *position* toward a point behind the board's nose. On the
+island that showed three faults the playground never exposed: riding fakie put the camera in front
+of the skater, the camera climbed vert walls and bowl transitions with the skater (looking down at
+them from above the coping), and a half-pipe reversal ran the skater straight through the camera.
+The rig is rebuilt around what the reference games do:
+
+- **Heading follows the direction of travel, not the nose** (Skate, Tony Hawk's). The camera's
+  yaw is a damped spring on the travel heading with a rate cap: 2.6 rad/s for carves, rising to
+  7.5 rad/s when travel reverses so a rider rolling back down a wall is orbited, not overtaken.
+  Below 1.2 u/s the heading holds. Spins, boardslides and fakie never swing the camera.
+- **Rigid horizontal offset, soft vertical.** The camera sits exactly `back` metres behind the
+  heading (only the distance eases), so the skater can never pass through it. Height is a slow
+  spring (ω 2.2) off the last *level* floor the skater stood on: airs, wall rides and vert are
+  framed by pitching up from the bottom of the ramp, like a filmer on the flat, not by bobbing
+  with the jump (Journey's rule: never move the camera for something the player didn't do).
+- **Never inside the concrete.** A floor probe over the compound lifts the camera 0.7 m above
+  whatever rideable surface is under it, applied to the target (so the spring does the lifting)
+  and as a hard clamp. Behind a skater in a bowl the camera rides the wall up onto the deck.
+- **Look leads along velocity** (capped at 3.2 m), whip clamp kept, but the clamp never fights
+  the heading swing itself.
+- **Per-state framing:** air pulls back 0.5 m and looks a little higher; grinds drop 0.3 m and
+  pull back 0.3 m (the Phase 8 brief); bails pull back 1.2 m and up 0.4 m. Roll into carves stays,
+  gated off in the air and in bails.
+
+Measured on the island (portrait 390×700, skater's normalised screen position): carving ±0.17
+horizontally, kicker air and chute drop within ±0.32 vertically, a full vert wall ride and
+reversal peaks at 0.30 horizontally with the skater never leaving the frame (it was off-screen
+by 9–37 screen widths before), fakie riding centred with the camera behind the travel direction.
+
+**Stairs are a bank now.** The stair set had a ground hole under the steps and a wall only at
+the top edge, so rolling into the stairs from below, or off the platform slowly, dropped the
+skater into the void. The steps are a 27° bank surface joined to the platform top and the ground:
+roll off the top and you land on it; ride into it and you climb or roll back.
+
 ### Known gaps, on purpose
 
 - The autopilot used for the loop test steers crudely; a straight unsteered rider through the snake
